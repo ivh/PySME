@@ -41,7 +41,7 @@ jobs:
         with:
           msystem: MINGW64
           update: false
-          install: mingw-w64-x86_64-gcc-fortran
+          install: mingw-w64-x86_64-gcc-fortran mingw-w64-x86_64-ninja
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.22
@@ -52,6 +52,7 @@ jobs:
             FC="C:\\msys64\\mingw64\\bin\\gfortran.exe"
             CC="C:\\msys64\\mingw64\\bin\\gcc.exe"
             CXX="C:\\msys64\\mingw64\\bin\\g++.exe"
+            CMAKE_GENERATOR="Ninja"
 
       - uses: actions/upload-artifact@v4
         with:
