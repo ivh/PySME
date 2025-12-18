@@ -35,10 +35,23 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc-fortran
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.22
         env:
           CIBW_BUILD_VERBOSITY: 1
+          CIBW_ENVIRONMENT_WINDOWS: >
+            PATH="C:\\msys64\\mingw64\\bin;$PATH"
+            FC="C:\\msys64\\mingw64\\bin\\gfortran.exe"
+            CC="C:\\msys64\\mingw64\\bin\\gcc.exe"
+            CXX="C:\\msys64\\mingw64\\bin\\g++.exe"
 
       - uses: actions/upload-artifact@v4
         with:

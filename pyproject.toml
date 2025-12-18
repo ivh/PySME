@@ -83,9 +83,7 @@ repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
-before-all = "choco install mingw -y"
 before-build = "pip install delvewheel"
-environment = { FC = "gfortran", CC = "gcc", CXX = "g++" }
 repair-wheel-command = "delvewheel repair -w {dest_dir} {wheel}"
 
 # Black
