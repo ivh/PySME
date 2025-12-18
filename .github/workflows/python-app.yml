@@ -47,12 +47,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.22
         env:
           CIBW_BUILD_VERBOSITY: 1
-          CIBW_ENVIRONMENT_WINDOWS: >
-            PATH="C:\\msys64\\mingw64\\bin;$PATH"
-            FC="C:\\msys64\\mingw64\\bin\\gfortran.exe"
-            CC="C:\\msys64\\mingw64\\bin\\gcc.exe"
-            CXX="C:\\msys64\\mingw64\\bin\\g++.exe"
-            CMAKE_GENERATOR="Ninja"
+          CIBW_ENVIRONMENT_WINDOWS: 'PATH="C:\\msys64\\mingw64\\bin;{PATH}" FC=gfortran CC=gcc CXX=g++ CMAKE_GENERATOR=Ninja'
 
       - uses: actions/upload-artifact@v4
         with:
