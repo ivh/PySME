@@ -83,8 +83,7 @@ repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
-before-build = "pip install delvewheel"
-repair-wheel-command = "delvewheel repair --add-path {project}/build --add-path C:/msys64/mingw64/bin -w {dest_dir} {wheel}"
+repair-wheel-command = ""
 
 # Black
 [tool.black]
