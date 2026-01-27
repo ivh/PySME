@@ -114,6 +114,15 @@ src/pysme/
 │   └── plot_pyplot.py       # (existing)
 ```
 
+### TODO: Move frontend source out of src/pysme/
+
+Having `frontend/` inside `src/pysme/gui/` is suboptimal:
+- `node_modules/` pollutes the Python source tree
+- Risk of accidentally including build artifacts in the wheel
+- Conceptual mixing of JS build artifacts with Python source
+
+**Proposed structure:** Move frontend source to repo root (`/frontend/` or `/webgui/`), keep only `gui/static/` inside the package. The build process would copy compiled assets into `src/pysme/gui/static/`.
+
 ## API Endpoints
 
 ### Session Management
