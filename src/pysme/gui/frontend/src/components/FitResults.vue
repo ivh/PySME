@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import type { FitResult } from '../api'
+import type { FitResult, MCMCResult } from '../api'
 
-defineProps<{
-  results: FitResult
+const props = defineProps<{
+  results: FitResult | null
+  mcmcResults: MCMCResult | null
 }>()
 
 const paramLabels: Record<string, string> = {
@@ -27,39 +28,89 @@ function formatUncertainty(unc: number, param: string): string {
   }
   return unc.toFixed(3)
 }
+
+function formatAsymmetricUnc(lo: number, hi: number, param: string): string {
+  const fmt = param === 'teff' ? 0 : 3
+  return `-${lo.toFixed(fmt)} / +${hi.toFixed(fmt)}`
+}
+
+function getParamLabel(param: string): string {
+  if (param.startsWith('abund ')) {
+    return `[${param.split(' ')[1]}/H]`
+  }
+  return paramLabels[param] || param
+}
 </script>
 
 <template>
   <div class="fit-results">
-    <h2>Fit Results</h2>
+    <!-- Least-squares results -->
+    <template v-if="results">
+      <h2>Fit Results (Least-Squares)</h2>
 
-    <div class="summary">
-      <div class="stat">
-        <span class="label">Reduced Chi-squared:</span>
-        <span class="value">{{ results.chisq.toFixed(4) }}</span>
+      <div class="summary">
+        <div class="stat">
+          <span class="label">Reduced Chi-squared:</span>
+          <span class="value">{{ results.chisq.toFixed(4) }}</span>
+        </div>
+        <div class="stat">
+          <span class="label">Iterations:</span>
+          <span class="value">{{ results.iterations }}</span>
+        </div>
       </div>
-      <div class="stat">
-        <span class="label">Iterations:</span>
-        <span class="value">{{ results.iterations }}</span>
+
+      <table class="results-table">
+        <thead>
+          <tr>
+            <th>Parameter</th>
+            <th>Value</th>
+            <th>Uncertainty</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(param, index) in results.parameters" :key="param">
+            <td>{{ getParamLabel(param) }}</td>
+            <td class="value">{{ formatValue(results.values[index], param) }}</td>
+            <td class="uncertainty">+/- {{ formatUncertainty(results.uncertainties[index], param) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </template>
+
+    <!-- MCMC results -->
+    <template v-if="mcmcResults">
+      <h2>MCMC Results</h2>
+
+      <div class="summary">
+        <div class="stat">
+          <span class="label">Acceptance Fraction:</span>
+          <span class="value">{{ (mcmcResults.acceptance_fraction * 100).toFixed(1) }}%</span>
+        </div>
       </div>
+
+      <table class="results-table">
+        <thead>
+          <tr>
+            <th>Parameter</th>
+            <th>Median</th>
+            <th>Uncertainty (16%-84%)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(param, index) in mcmcResults.parameters" :key="param">
+            <td>{{ getParamLabel(param) }}</td>
+            <td class="value">{{ formatValue(mcmcResults.values[index], param) }}</td>
+            <td class="uncertainty mcmc">
+              {{ formatAsymmetricUnc(mcmcResults.uncertainties_low[index], mcmcResults.uncertainties_high[index], param) }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </template>
+
+    <div v-if="!results && !mcmcResults" class="no-results">
+      No fit results yet. Run Solve or MCMC to fit parameters.
     </div>
-
-    <table class="results-table">
-      <thead>
-        <tr>
-          <th>Parameter</th>
-          <th>Value</th>
-          <th>Uncertainty</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="(param, index) in results.parameters" :key="param">
-          <td>{{ paramLabels[param] || param }}</td>
-          <td class="value">{{ formatValue(results.values[index], param) }}</td>
-          <td class="uncertainty">+/- {{ formatUncertainty(results.uncertainties[index], param) }}</td>
-        </tr>
-      </tbody>
-    </table>
   </div>
 </template>
 
@@ -68,6 +119,10 @@ function formatUncertainty(unc: number, param: string): string {
   font-size: 1.1rem;
   margin-bottom: 1rem;
   color: var(--text);
+}
+
+.fit-results h2:not(:first-child) {
+  margin-top: 2rem;
 }
 
 .summary {
@@ -125,5 +180,16 @@ function formatUncertainty(unc: number, param: string): string {
 .results-table td.uncertainty {
   color: var(--text-muted);
   font-family: monospace;
+}
+
+.results-table td.uncertainty.mcmc {
+  color: var(--primary);
+}
+
+.no-results {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 1rem;
+  text-align: center;
 }
 </style>

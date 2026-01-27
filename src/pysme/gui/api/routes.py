@@ -18,12 +18,18 @@ from ...sme import SME_Structure
 from ...synthesize import synthesize_spectrum
 from ...solve import SME_Solver
 from .models import (
+    AbundanceFitSettings,
     AbundPatternUpdate,
     ContinuumSettings,
     FitResult,
     FitSettings,
     InstrumentSettings,
     LinelistInfo,
+    MaskUpdate,
+    MCMCRequest,
+    MCMCResult,
+    MultiSegmentWaveLimits,
+    NLTESettings,
     RadialVelocitySettings,
     SessionState,
     SpectrumData,
@@ -45,18 +51,35 @@ class Session:
         self.sme: Optional[SME_Structure] = None
         self.filename: Optional[str] = None
         self.abund_pattern: str = "asplund2021"
+        self.nlte_enabled: bool = False
+        self.fit_abundances: list[str] = []
         self.solver: Optional[SME_Solver] = None
         self.solve_task: Optional[threading.Thread] = None
         self.solve_cancelled: bool = False
         self.solve_progress: list[dict] = []
         self.solve_done: bool = False
         self.solve_error: Optional[str] = None
+        self.mcmc_runner = None
+        self.mcmc_task: Optional[threading.Thread] = None
+        self.mcmc_done: bool = False
+        self.mcmc_error: Optional[str] = None
+        self.mcmc_results: Optional[dict] = None
 
     def reset(self):
         self.sme = None
         self.filename = None
         self.abund_pattern = "asplund2021"
+        self.nlte_enabled = False
+        self.fit_abundances = []
         self.cancel_solve()
+        self.cancel_mcmc()
+
+    def cancel_mcmc(self):
+        self.mcmc_runner = None
+        self.mcmc_task = None
+        self.mcmc_done = False
+        self.mcmc_error = None
+        self.mcmc_results = None
 
     def cancel_solve(self):
         self.solve_cancelled = True
@@ -143,6 +166,8 @@ async def get_session():
         instrument=InstrumentSettings(
             ipres=float(np.mean(sme.ipres)) if sme.ipres is not None and len(sme.ipres) > 0 else None,
             iptype=sme.iptype or "gauss",
+            vrad=float(sme.vrad[0]) if sme.vrad is not None and len(sme.vrad) > 0 else None,
+            snr=None,
         ),
         continuum=ContinuumSettings(
             cscale_flag=sme.cscale_flag or "linear",
@@ -153,7 +178,26 @@ async def get_session():
         ),
         abund_pattern=session.abund_pattern,
         wran=sme.wran.tolist() if sme.wran is not None else None,
+        nlte_enabled=session.nlte_enabled,
+        fit_abundances=session.fit_abundances,
+        available_elements=_get_available_elements(sme),
     )
+
+
+def _get_available_elements(sme: SME_Structure) -> list[str]:
+    """Get unique elements from linelist."""
+    if sme.linelist is None or len(sme.linelist) == 0:
+        return []
+    try:
+        species = sme.linelist.species
+        elements = set()
+        for s in species:
+            elem = s.split()[0].strip("0123456789")
+            if elem:
+                elements.add(elem)
+        return sorted(elements)
+    except Exception:
+        return []
 
 
 @router.post("/session/save")
@@ -256,6 +300,14 @@ async def update_instrument(settings: InstrumentSettings):
         session.sme.ipres = settings.ipres
     if settings.iptype:
         session.sme.iptype = settings.iptype
+    if settings.vrad is not None:
+        session.sme.vrad = np.array([settings.vrad])
+    if settings.snr is not None and settings.snr > 0:
+        from ...iliffe_vector import Iliffe_vector
+        if session.sme.spec is not None:
+            session.sme.uncs = Iliffe_vector([
+                np.full_like(seg, 1.0 / settings.snr) for seg in session.sme.spec
+            ])
 
     return {"status": "ok"}
 
@@ -304,7 +356,7 @@ async def update_abund_pattern(update: AbundPatternUpdate):
 
 @router.put("/wave-limits")
 async def update_wave_limits(update: WaveLimitsUpdate):
-    """Update wavelength limits for synthesis."""
+    """Update wavelength limits for synthesis (single segment)."""
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -314,6 +366,59 @@ async def update_wave_limits(update: WaveLimitsUpdate):
     session.sme.wran = np.array([[update.wl_min, update.wl_max]])
 
     return {"status": "ok"}
+
+
+@router.put("/wave-limits/multi")
+async def update_wave_limits_multi(update: MultiSegmentWaveLimits):
+    """Update wavelength limits for multiple segments."""
+    if session.sme is None:
+        raise HTTPException(status_code=400, detail="No session loaded")
+
+    if not update.segments:
+        raise HTTPException(status_code=400, detail="At least one segment required")
+
+    for i, seg in enumerate(update.segments):
+        if len(seg) != 2:
+            raise HTTPException(status_code=400, detail=f"Segment {i} must have exactly 2 values")
+        if seg[0] >= seg[1]:
+            raise HTTPException(status_code=400, detail=f"Segment {i}: wl_min must be less than wl_max")
+
+    session.sme.wran = np.array(update.segments)
+
+    return {"status": "ok", "nseg": len(update.segments)}
+
+
+NLTE_ELEMENTS = ["H", "Li", "C", "N", "O", "Na", "Mg", "Al", "Si", "K", "Ca", "Ti", "Mn", "Fe", "Cu", "Ba"]
+
+
+@router.put("/nlte")
+async def update_nlte(settings: NLTESettings):
+    """Enable or disable NLTE for supported elements."""
+    if session.sme is None:
+        raise HTTPException(status_code=400, detail="No session loaded")
+
+    if settings.enabled:
+        for element in NLTE_ELEMENTS:
+            try:
+                session.sme.nlte.set_nlte(element)
+            except Exception:
+                pass
+    else:
+        session.sme.nlte.elements = []
+        session.sme.nlte.grids = {}
+
+    session.nlte_enabled = settings.enabled
+    return {"status": "ok", "enabled": settings.enabled, "elements": list(session.sme.nlte.elements)}
+
+
+@router.put("/fit-abundances")
+async def update_fit_abundances(settings: AbundanceFitSettings):
+    """Update which element abundances to fit."""
+    if session.sme is None:
+        raise HTTPException(status_code=400, detail="No session loaded")
+
+    session.fit_abundances = settings.elements
+    return {"status": "ok", "elements": settings.elements}
 
 
 @router.get("/spectrum", response_model=SpectrumData)
@@ -354,6 +459,26 @@ async def get_spectrum_plot(segment: int = 0):
     except Exception as e:
         logger.exception("Failed to create plot")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/spectrum/mask")
+async def update_mask(update: MaskUpdate):
+    """Update spectrum mask in a wavelength range."""
+    if session.sme is None:
+        raise HTTPException(status_code=400, detail="No session loaded")
+
+    if session.sme.mask is None or session.sme.wave is None:
+        raise HTTPException(status_code=400, detail="No spectrum loaded")
+
+    if update.segment >= len(session.sme.mask):
+        raise HTTPException(status_code=400, detail=f"Invalid segment: {update.segment}")
+
+    wave = session.sme.wave[update.segment]
+    mask = session.sme.mask[update.segment]
+    idx = (wave >= update.wl_min) & (wave <= update.wl_max)
+    mask[idx] = update.mask_value
+
+    return {"status": "ok", "modified_points": int(np.sum(idx))}
 
 
 @router.post("/spectrum/load")
@@ -534,8 +659,12 @@ async def solve(request: SolveRequest):
     if session.sme.spec is None:
         raise HTTPException(status_code=400, detail="No observed spectrum loaded")
 
-    if not request.parameters:
+    if not request.parameters and not session.fit_abundances:
         raise HTTPException(status_code=400, detail="No parameters to fit")
+
+    fitparams = list(request.parameters)
+    for elem in session.fit_abundances:
+        fitparams.append(f"abund {elem}")
 
     session.solve_cancelled = False
     session.solve_done = False
@@ -543,7 +672,7 @@ async def solve(request: SolveRequest):
     session.solve_progress = []
 
     thread = threading.Thread(
-        target=_run_solve, args=(session.sme, request.parameters)
+        target=_run_solve, args=(session.sme, fitparams)
     )
     session.solve_task = thread
     thread.start()
@@ -610,4 +739,103 @@ async def get_fit_results():
         uncertainties=[float(u) for u in fr.uncertainties] if fr.uncertainties is not None else [],
         chisq=float(fr.chisq) if fr.chisq is not None else 0.0,
         iterations=int(fr.iterations) if fr.iterations is not None else 0,
+    )
+
+
+def _run_mcmc(sme, params, nwalkers, nsteps, nburn):
+    """Run MCMC in background thread."""
+    from ...solve import SME_MCMC
+
+    try:
+        mcmc = SME_MCMC(sme, nwalkers=nwalkers, nsteps=nsteps, nburn=nburn)
+        session.mcmc_runner = mcmc
+        results = mcmc.run(params, progress=False)
+        session.sme = mcmc.sme
+        session.mcmc_results = results
+        session.mcmc_done = True
+    except Exception as e:
+        logger.exception("MCMC failed")
+        session.mcmc_error = str(e)
+        session.mcmc_done = True
+
+
+@router.post("/mcmc")
+async def run_mcmc(request: MCMCRequest):
+    """Start MCMC parameter estimation."""
+    if session.sme is None:
+        raise HTTPException(status_code=400, detail="No session loaded")
+
+    if session.sme.linelist is None or len(session.sme.linelist) == 0:
+        raise HTTPException(status_code=400, detail="No linelist loaded")
+
+    if session.sme.spec is None:
+        raise HTTPException(status_code=400, detail="No observed spectrum loaded")
+
+    params = list(request.parameters)
+    for elem in session.fit_abundances:
+        params.append(f"abund {elem}")
+
+    if not params:
+        raise HTTPException(status_code=400, detail="No parameters to sample")
+
+    session.mcmc_done = False
+    session.mcmc_error = None
+    session.mcmc_results = None
+    session.mcmc_runner = None
+
+    thread = threading.Thread(
+        target=_run_mcmc,
+        args=(session.sme, params, request.nwalkers, request.nsteps, request.nburn),
+    )
+    session.mcmc_task = thread
+    thread.start()
+
+    return {"status": "ok", "message": "MCMC started"}
+
+
+@router.get("/mcmc/stream")
+async def mcmc_stream():
+    """Stream MCMC progress via Server-Sent Events."""
+
+    async def event_generator():
+        while True:
+            if session.mcmc_error:
+                yield f"data: {json.dumps({'type': 'error', 'message': session.mcmc_error})}\n\n"
+                break
+
+            if session.mcmc_done:
+                result = {"type": "done"}
+                if session.mcmc_results:
+                    result.update({
+                        "parameters": session.mcmc_results.get("parameters", []),
+                        "values": session.mcmc_results.get("values", []),
+                        "uncertainties": session.mcmc_results.get("uncertainties", []),
+                        "uncertainties_low": session.mcmc_results.get("uncertainties_low", []),
+                        "uncertainties_high": session.mcmc_results.get("uncertainties_high", []),
+                        "acceptance_fraction": session.mcmc_results.get("acceptance_fraction", 0),
+                    })
+                yield f"data: {json.dumps(result)}\n\n"
+                break
+
+            if session.mcmc_runner:
+                yield f"data: {json.dumps({'type': 'progress', 'iteration': session.mcmc_runner.iteration})}\n\n"
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/mcmc/results", response_model=Optional[MCMCResult])
+async def get_mcmc_results():
+    """Get MCMC results."""
+    if session.mcmc_results is None:
+        return None
+
+    return MCMCResult(
+        parameters=session.mcmc_results.get("parameters", []),
+        values=session.mcmc_results.get("values", []),
+        uncertainties=session.mcmc_results.get("uncertainties", []),
+        uncertainties_low=session.mcmc_results.get("uncertainties_low", []),
+        uncertainties_high=session.mcmc_results.get("uncertainties_high", []),
+        acceptance_fraction=session.mcmc_results.get("acceptance_fraction", 0),
     )

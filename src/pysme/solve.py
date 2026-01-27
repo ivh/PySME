@@ -1071,3 +1071,216 @@ def solve(
         dynamic_param=dynamic_param,
         **kwargs,
     )
+
+
+class SME_MCMC:
+    """
+    MCMC parameter estimation for SME using emcee.
+
+    This provides Bayesian inference for stellar parameters with full
+    posterior distributions and proper uncertainty estimation.
+    """
+
+    def __init__(self, sme, nwalkers=32, nsteps=1000, nburn=200):
+        """
+        Initialize MCMC sampler.
+
+        Parameters
+        ----------
+        sme : SME_Structure
+            SME structure with observation, linelist, and initial parameters
+        nwalkers : int
+            Number of MCMC walkers (should be >= 2 * ndim)
+        nsteps : int
+            Number of MCMC steps after burn-in
+        nburn : int
+            Number of burn-in steps to discard
+        """
+        self.sme = sme
+        self.nwalkers = nwalkers
+        self.nsteps = nsteps
+        self.nburn = nburn
+        self.param_names = []
+        self.bounds = []
+        self.synthesizer = Synthesizer(config=setup_lfs())
+        self.sampler = None
+        self.iteration = 0
+
+    def _get_bounds(self, param_names):
+        """Get parameter bounds from atmosphere grid and sensible defaults."""
+        bounds = []
+        for name in param_names:
+            if name == "teff":
+                bounds.append((3000, 50000))
+            elif name == "logg":
+                bounds.append((-1, 6))
+            elif name == "monh":
+                bounds.append((-5, 1))
+            elif name == "vmic":
+                bounds.append((0, 20))
+            elif name == "vmac":
+                bounds.append((0, 50))
+            elif name == "vsini":
+                bounds.append((0, 500))
+            elif name.startswith("abund "):
+                bounds.append((-12, 0))
+            else:
+                bounds.append((-np.inf, np.inf))
+        return bounds
+
+    def _get_param(self, sme, name):
+        """Get parameter value from SME structure."""
+        if name.startswith("abund "):
+            elem = name.split()[1]
+            return sme.abund[elem]
+        return getattr(sme, name)
+
+    def _set_param(self, sme, name, value):
+        """Set parameter value on SME structure."""
+        if name.startswith("abund "):
+            elem = name.split()[1]
+            sme.abund[elem] = value
+        else:
+            setattr(sme, name, value)
+
+    def log_prior(self, theta):
+        """Compute log prior probability."""
+        for val, (lo, hi) in zip(theta, self.bounds):
+            if not lo <= val <= hi:
+                return -np.inf
+        return 0.0
+
+    def log_likelihood(self, theta):
+        """Compute log likelihood from spectrum residuals."""
+        for name, val in zip(self.param_names, theta):
+            self._set_param(self.sme, name, val)
+
+        try:
+            self.sme = self.synthesizer.synthesize_spectrum(
+                self.sme, segments="all", reuse_wavelength_grid=True
+            )
+        except Exception:
+            return -np.inf
+
+        chi2 = 0.0
+        for i in range(self.sme.nseg):
+            obs = self.sme.spec[i]
+            synth = self.sme.synth[i]
+            mask = self.sme.mask[i]
+            uncs = self.sme.uncs[i] if self.sme.uncs is not None else np.ones_like(obs) * 0.01
+
+            good = mask > 0
+            if np.sum(good) == 0:
+                continue
+
+            resid = (obs[good] - synth[good]) / uncs[good]
+            chi2 += np.sum(resid**2)
+
+        return -0.5 * chi2
+
+    def log_prob(self, theta):
+        """Compute log probability (prior + likelihood)."""
+        lp = self.log_prior(theta)
+        if not np.isfinite(lp):
+            return -np.inf
+        return lp + self.log_likelihood(theta)
+
+    def _initial_positions(self, p0):
+        """Initialize walker positions around current best-fit values."""
+        ndim = len(self.param_names)
+        positions = np.zeros((self.nwalkers, ndim))
+
+        for i, (name, val, (lo, hi)) in enumerate(zip(self.param_names, p0, self.bounds)):
+            scale = 0.01 * max(abs(val), 1) if np.isfinite(hi - lo) else 0.01 * abs(val)
+            positions[:, i] = val + scale * np.random.randn(self.nwalkers)
+            positions[:, i] = np.clip(positions[:, i], lo + 1e-6, hi - 1e-6)
+
+        return positions
+
+    def run(self, param_names, progress=True):
+        """
+        Run MCMC sampling.
+
+        Parameters
+        ----------
+        param_names : list of str
+            Names of parameters to sample
+        progress : bool
+            Show progress bar
+
+        Returns
+        -------
+        dict
+            Results with samples, medians, uncertainties
+        """
+        import emcee
+
+        self.param_names = param_names
+        self.bounds = self._get_bounds(param_names)
+        ndim = len(param_names)
+
+        if self.nwalkers < 2 * ndim:
+            self.nwalkers = 2 * ndim + 2
+            logger.warning(f"Increasing nwalkers to {self.nwalkers} (2*ndim + 2)")
+
+        p0 = [self._get_param(self.sme, name) for name in param_names]
+        initial_positions = self._initial_positions(p0)
+
+        self.sampler = emcee.EnsembleSampler(
+            self.nwalkers,
+            ndim,
+            self.log_prob,
+            moves=[
+                (emcee.moves.DEMove(), 0.8),
+                (emcee.moves.DESnookerMove(), 0.2),
+            ],
+        )
+
+        total_steps = self.nburn + self.nsteps
+        self.iteration = 0
+
+        if progress:
+            pbar = tqdm(total=total_steps, desc="MCMC")
+
+        for sample in self.sampler.sample(initial_positions, iterations=total_steps):
+            self.iteration += 1
+            if progress:
+                pbar.update(1)
+
+        if progress:
+            pbar.close()
+
+        return self.get_results()
+
+    def get_results(self):
+        """
+        Extract results from sampler.
+
+        Returns
+        -------
+        dict
+            Contains: samples, parameters, medians, uncertainties_low, uncertainties_high, chain
+        """
+        if self.sampler is None:
+            raise RuntimeError("MCMC has not been run yet")
+
+        samples = self.sampler.get_chain(discard=self.nburn, flat=True)
+
+        medians = np.median(samples, axis=0)
+        lo = np.percentile(samples, 16, axis=0)
+        hi = np.percentile(samples, 84, axis=0)
+
+        for name, val in zip(self.param_names, medians):
+            self._set_param(self.sme, name, val)
+
+        results = {
+            "parameters": self.param_names,
+            "values": medians.tolist(),
+            "uncertainties_low": (medians - lo).tolist(),
+            "uncertainties_high": (hi - medians).tolist(),
+            "uncertainties": ((hi - lo) / 2).tolist(),
+            "samples": samples,
+            "acceptance_fraction": np.mean(self.sampler.acceptance_fraction),
+        }
+
+        return results

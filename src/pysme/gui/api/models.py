@@ -33,6 +33,8 @@ class InstrumentSettings(BaseModel):
 
     ipres: Optional[float] = Field(None, ge=0, le=1000000, description="Resolving power")
     iptype: str = Field("gauss", description="Instrumental profile type")
+    vrad: Optional[float] = Field(None, description="Radial velocity in km/s")
+    snr: Optional[float] = Field(None, ge=1, description="Signal-to-noise ratio")
 
 
 class ContinuumSettings(BaseModel):
@@ -63,6 +65,15 @@ class SessionState(BaseModel):
     radial_velocity: RadialVelocitySettings = Field(default_factory=RadialVelocitySettings)
     abund_pattern: str = "asplund2021"
     wran: Optional[list[list[float]]] = None
+    nlte_enabled: bool = False
+    fit_abundances: list[str] = Field(default_factory=list)
+    available_elements: list[str] = Field(default_factory=list)
+
+
+class NLTESettings(BaseModel):
+    """NLTE settings."""
+
+    enabled: bool = Field(..., description="Enable NLTE for supported elements")
 
 
 class AbundPatternUpdate(BaseModel):
@@ -76,6 +87,12 @@ class WaveLimitsUpdate(BaseModel):
 
     wl_min: float = Field(..., description="Minimum wavelength in Angstrom")
     wl_max: float = Field(..., description="Maximum wavelength in Angstrom")
+
+
+class MultiSegmentWaveLimits(BaseModel):
+    """Update wavelength limits for multiple segments."""
+
+    segments: list[list[float]] = Field(..., description="List of [wl_min, wl_max] pairs")
 
 
 class SpectrumData(BaseModel):
@@ -110,6 +127,41 @@ class SolveRequest(BaseModel):
 
     parameters: list[str]
     segments: Optional[list[int]] = None
+
+
+class AbundanceFitSettings(BaseModel):
+    """Settings for fitting element abundances."""
+
+    elements: list[str] = Field(default_factory=list, description="Elements to fit abundances for")
+
+
+class MaskUpdate(BaseModel):
+    """Update spectrum mask in a wavelength range."""
+
+    segment: int = Field(0, ge=0, description="Segment index")
+    wl_min: float = Field(..., description="Minimum wavelength")
+    wl_max: float = Field(..., description="Maximum wavelength")
+    mask_value: int = Field(..., ge=0, le=2, description="Mask value: 0=bad, 1=line, 2=continuum")
+
+
+class MCMCRequest(BaseModel):
+    """Request to run MCMC parameter estimation."""
+
+    parameters: list[str] = Field(..., description="Parameters to sample")
+    nwalkers: int = Field(32, ge=4, description="Number of MCMC walkers")
+    nsteps: int = Field(500, ge=10, description="Number of MCMC steps")
+    nburn: int = Field(100, ge=0, description="Number of burn-in steps")
+
+
+class MCMCResult(BaseModel):
+    """MCMC fitting results."""
+
+    parameters: list[str]
+    values: list[float]
+    uncertainties: list[float]
+    uncertainties_low: list[float]
+    uncertainties_high: list[float]
+    acceptance_fraction: float
 
 
 class LinelistInfo(BaseModel):

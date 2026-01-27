@@ -12,6 +12,10 @@ const props = defineProps<{
   hasLinelist: boolean
   waveRange: [number, number] | null
   abundPattern: string
+  nlteEnabled: boolean
+  forwardMode: boolean
+  fitAbundances: string[]
+  availableElements: string[]
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +26,9 @@ const emit = defineEmits<{
   'update-vrad': [settings: Partial<RadialVelocitySettings>]
   'update-abund-pattern': [pattern: string]
   'update-wave-limits': [limits: { wl_min: number; wl_max: number }]
+  'update-wave-limits-multi': [segments: number[][]]
+  'update-nlte': [enabled: boolean]
+  'update-fit-abundances': [elements: string[]]
   'linelist-loaded': []
   'error': [message: string]
 }>()
@@ -31,14 +38,16 @@ const localFitSettings = ref<FitSettings>({ ...props.fitSettings })
 const localInstrument = ref({
   ipres: props.instrument.ipres ?? 100000,
   iptype: props.instrument.iptype || 'gauss',
-  snr: 100,
-  vrad: 0,
+  snr: props.instrument.snr ?? 100,
+  vrad: props.instrument.vrad ?? 0,
 })
 const localContinuum = ref<ContinuumSettings>({ ...props.continuum })
 const localAbundPattern = ref(props.abundPattern || 'asplund2021')
 const localWlMin = ref<number | null>(null)
 const localWlMax = ref<number | null>(null)
-const doNlte = ref(false)
+const waveSegments = ref<Array<{min: number | null, max: number | null}>>([])
+const doNlte = ref(props.nlteEnabled)
+const selectedAbundances = ref<string[]>([...props.fitAbundances])
 const retainContinuum = ref(false)
 
 const linelistFileInput = ref<HTMLInputElement | null>(null)
@@ -55,6 +64,12 @@ watch(() => props.fitSettings, (newSettings) => {
 watch(() => props.instrument, (newSettings) => {
   localInstrument.value.ipres = newSettings.ipres ?? 100000
   localInstrument.value.iptype = newSettings.iptype || 'gauss'
+  if (newSettings.vrad !== null) {
+    localInstrument.value.vrad = newSettings.vrad
+  }
+  if (newSettings.snr !== null) {
+    localInstrument.value.snr = newSettings.snr
+  }
 }, { deep: true })
 
 watch(() => props.continuum, (newSettings) => {
@@ -66,12 +81,23 @@ watch(() => props.waveRange, (range) => {
   if (range && localWlMin.value === null) {
     localWlMin.value = range[0]
     localWlMax.value = range[1]
+    if (waveSegments.value.length === 0) {
+      waveSegments.value = [{ min: range[0], max: range[1] }]
+    }
   }
 })
 
 watch(() => props.abundPattern, (pattern) => {
   localAbundPattern.value = pattern || 'asplund2021'
 })
+
+watch(() => props.nlteEnabled, (enabled) => {
+  doNlte.value = enabled
+})
+
+watch(() => props.fitAbundances, (abundances) => {
+  selectedAbundances.value = [...abundances]
+}, { deep: true })
 
 function updateParam(key: keyof StellarParams, value: number | null) {
   localParams.value[key] = value
@@ -87,6 +113,8 @@ async function updateInstrument() {
   emit('update-instrument', {
     ipres: localInstrument.value.ipres,
     iptype: localInstrument.value.iptype,
+    vrad: localInstrument.value.vrad,
+    snr: localInstrument.value.snr,
   })
 }
 
@@ -104,9 +132,44 @@ function updateWaveLimits() {
   }
 }
 
+function addSegment() {
+  const lastSeg = waveSegments.value[waveSegments.value.length - 1]
+  const newMin = lastSeg && lastSeg.max ? lastSeg.max + 10 : 5000
+  waveSegments.value.push({ min: newMin, max: newMin + 50 })
+}
+
+function removeSegment(index: number) {
+  if (waveSegments.value.length > 1) {
+    waveSegments.value.splice(index, 1)
+  }
+}
+
+function updateMultiWaveLimits() {
+  const validSegments = waveSegments.value
+    .filter(s => s.min !== null && s.max !== null && s.min < s.max)
+    .map(s => [s.min!, s.max!])
+  if (validSegments.length > 0) {
+    emit('update-wave-limits-multi', validSegments)
+  }
+}
+
 function updateContinuumRetain() {
   const flag = retainContinuum.value ? 'none' : 'linear'
   emit('update-continuum', { cscale_flag: flag })
+}
+
+function updateNlte() {
+  emit('update-nlte', doNlte.value)
+}
+
+function toggleAbundance(elem: string) {
+  const idx = selectedAbundances.value.indexOf(elem)
+  if (idx >= 0) {
+    selectedAbundances.value.splice(idx, 1)
+  } else {
+    selectedAbundances.value.push(elem)
+  }
+  emit('update-fit-abundances', [...selectedAbundances.value])
 }
 
 async function handleLinelistFileSelect(event: Event) {
@@ -175,6 +238,7 @@ const linelistOptions = [
               <input
                 type="number"
                 v-model.number="localInstrument.snr"
+                @change="updateInstrument"
                 step="10"
                 min="1"
               />
@@ -188,6 +252,7 @@ const linelistOptions = [
               <input
                 type="number"
                 v-model.number="localInstrument.vrad"
+                @change="updateInstrument"
                 step="1"
               />
               <span class="unit">km/s</span>
@@ -203,6 +268,7 @@ const linelistOptions = [
           <div v-for="param in stellarParamDefs" :key="param.key" class="param-row">
             <label class="param-label">
               <input
+                v-if="!forwardMode"
                 type="checkbox"
                 :checked="localFitSettings[param.fitKey]"
                 @change="updateFitSetting(param.fitKey, ($event.target as HTMLInputElement).checked)"
@@ -221,10 +287,27 @@ const linelistOptions = [
             </div>
           </div>
         </div>
-        <p class="info">
+        <p v-if="!forwardMode" class="info">
           Checked: Parameter will be derived by SME using initial guess from textbox.<br>
           Unchecked: Parameter is fixed to the textbox value.
         </p>
+
+        <template v-if="!forwardMode && availableElements.length > 0">
+          <h3>Fit abundances</h3>
+          <div class="element-chips">
+            <button
+              v-for="elem in availableElements"
+              :key="elem"
+              type="button"
+              class="element-chip"
+              :class="{ selected: selectedAbundances.includes(elem) }"
+              @click="toggleAbundance(elem)"
+            >
+              {{ elem }}
+            </button>
+          </div>
+          <p class="info">Click elements to fit their abundances.</p>
+        </template>
       </div>
 
       <!-- References -->
@@ -271,25 +354,37 @@ const linelistOptions = [
 
       <!-- Options -->
       <div class="form-column">
-        <h3>Wavelength limits</h3>
-        <div class="wavelength-row">
-          <span>From</span>
-          <input
-            type="number"
-            v-model.number="localWlMin"
-            @change="updateWaveLimits"
-            step="0.1"
-            class="wl-input"
-          />
-          <span>to</span>
-          <input
-            type="number"
-            v-model.number="localWlMax"
-            @change="updateWaveLimits"
-            step="0.1"
-            class="wl-input"
-          />
-          <span>A</span>
+        <h3>Wavelength segments</h3>
+        <div class="segments-list">
+          <div v-for="(seg, idx) in waveSegments" :key="idx" class="wavelength-row">
+            <span class="seg-label">{{ idx + 1 }}.</span>
+            <input
+              type="number"
+              v-model.number="seg.min"
+              @change="updateMultiWaveLimits"
+              step="0.1"
+              class="wl-input"
+              placeholder="min"
+            />
+            <span>-</span>
+            <input
+              type="number"
+              v-model.number="seg.max"
+              @change="updateMultiWaveLimits"
+              step="0.1"
+              class="wl-input"
+              placeholder="max"
+            />
+            <span>A</span>
+            <button
+              v-if="waveSegments.length > 1"
+              type="button"
+              class="btn-remove"
+              @click="removeSegment(idx)"
+              title="Remove segment"
+            >x</button>
+          </div>
+          <button type="button" class="btn-add-segment" @click="addSegment">+ Add segment</button>
         </div>
 
         <h3>Options</h3>
@@ -298,6 +393,7 @@ const linelistOptions = [
             <input
               type="checkbox"
               v-model="doNlte"
+              @change="updateNlte"
             />
             NLTE (H, Li, C, N, O, Na, Mg, Al, Si, K, Ca, Ti, Mn, Fe, Cu, Ba)
           </label>
@@ -464,5 +560,74 @@ const linelistOptions = [
   color: var(--text-muted);
   margin-top: 0.75rem;
   line-height: 1.4;
+}
+
+.segments-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.seg-label {
+  min-width: 20px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.btn-remove {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  color: var(--danger);
+  font-size: 0.75rem;
+}
+
+.btn-remove:hover {
+  background: #fef2f2;
+}
+
+.btn-add-segment {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+.btn-add-segment:hover {
+  background: #f0f7ff;
+  border-color: var(--primary);
+}
+
+.element-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.element-chip {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.element-chip:hover {
+  border-color: var(--primary);
+}
+
+.element-chip.selected {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
 }
 </style>

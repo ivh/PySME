@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { api, type SessionState, type StellarParams, type FitSettings, type FitResult, type InstrumentSettings, type ContinuumSettings } from './api'
+import { api, type SessionState, type StellarParams, type FitSettings, type FitResult, type MCMCResult, type InstrumentSettings, type ContinuumSettings } from './api'
 import SpectrumPlot from './components/SpectrumPlot.vue'
 import ParameterForm from './components/ParameterForm.vue'
 import FileControls from './components/FileControls.vue'
@@ -13,7 +13,10 @@ const solving = ref(false)
 const error = ref<string | null>(null)
 const status = ref<string | null>(null)
 const fitResults = ref<FitResult | null>(null)
+const mcmcResults = ref<MCMCResult | null>(null)
 const plotKey = ref(0)
+const forwardMode = ref(false)
+const runningMCMC = ref(false)
 
 const hasData = computed(() => session.value?.has_observation || session.value?.has_synthetic)
 const canSynthesize = computed(() => session.value?.has_linelist)
@@ -32,6 +35,7 @@ async function refreshSession() {
   try {
     session.value = await api.getSession()
     fitResults.value = await api.getFitResults()
+    mcmcResults.value = await api.getMCMCResults()
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to refresh session'
   }
@@ -109,6 +113,33 @@ async function handleWaveLimitsChanged(limits: { wl_min: number; wl_max: number 
     await refreshSession()
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to update wavelength limits'
+  }
+}
+
+async function handleWaveLimitsMultiChanged(segments: number[][]) {
+  try {
+    await api.updateWaveLimitsMulti(segments)
+    await refreshSession()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to update wavelength segments'
+  }
+}
+
+async function handleNlteChanged(enabled: boolean) {
+  try {
+    await api.updateNLTE(enabled)
+    await refreshSession()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to update NLTE settings'
+  }
+}
+
+async function handleFitAbundancesChanged(elements: string[]) {
+  try {
+    await api.updateFitAbundances(elements)
+    await refreshSession()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to update fit abundances'
   }
 }
 
@@ -199,6 +230,65 @@ async function handleCancel() {
   }
 }
 
+async function handleMCMC() {
+  if (!session.value) return
+
+  const fitParams: string[] = []
+  const settings = session.value.fit_settings
+  if (settings.fit_teff) fitParams.push('teff')
+  if (settings.fit_logg) fitParams.push('logg')
+  if (settings.fit_monh) fitParams.push('monh')
+  if (settings.fit_vmic) fitParams.push('vmic')
+  if (settings.fit_vmac) fitParams.push('vmac')
+  if (settings.fit_vsini) fitParams.push('vsini')
+
+  if (fitParams.length === 0 && session.value.fit_abundances.length === 0) {
+    error.value = 'No parameters selected for MCMC'
+    return
+  }
+
+  runningMCMC.value = true
+  error.value = null
+  status.value = 'Starting MCMC...'
+
+  try {
+    await api.runMCMC(fitParams)
+
+    const eventSource = api.mcmcStream()
+
+    eventSource.onmessage = async (event) => {
+      const data = JSON.parse(event.data)
+
+      if (data.type === 'progress') {
+        status.value = `MCMC... step ${data.iteration}`
+      } else if (data.type === 'done') {
+        eventSource.close()
+        runningMCMC.value = false
+        await refreshSession()
+        plotKey.value++
+        const acc = data.acceptance_fraction ? (data.acceptance_fraction * 100).toFixed(1) : 'N/A'
+        status.value = `MCMC complete (acceptance: ${acc}%)`
+      } else if (data.type === 'error') {
+        eventSource.close()
+        runningMCMC.value = false
+        error.value = data.message
+        status.value = null
+      }
+    }
+
+    eventSource.onerror = () => {
+      eventSource.close()
+      runningMCMC.value = false
+      error.value = 'Connection to server lost'
+      status.value = null
+    }
+  } catch (e) {
+    runningMCMC.value = false
+    error.value = e instanceof Error ? e.message : 'MCMC failed'
+    status.value = null
+  }
+}
+
 onMounted(async () => {
   await refreshSession()
 })
@@ -245,12 +335,19 @@ onMounted(async () => {
           :has-linelist="session.has_linelist"
           :wave-range="waveRange"
           :abund-pattern="session.abund_pattern"
+          :nlte-enabled="session.nlte_enabled"
+          :forward-mode="forwardMode"
+          :fit-abundances="session.fit_abundances"
+          :available-elements="session.available_elements"
           @update-params="handleParamsChanged"
           @update-fit-settings="handleFitSettingsChanged"
           @update-instrument="handleInstrumentChanged"
           @update-continuum="handleContinuumChanged"
           @update-abund-pattern="handleAbundPatternChanged"
           @update-wave-limits="handleWaveLimitsChanged"
+          @update-wave-limits-multi="handleWaveLimitsMultiChanged"
+          @update-nlte="handleNlteChanged"
+          @update-fit-abundances="handleFitAbundancesChanged"
           @linelist-loaded="refreshSession"
           @error="error = $event"
         />
@@ -258,6 +355,10 @@ onMounted(async () => {
 
       <section v-if="session" class="section actions-section">
         <div class="actions">
+          <label class="mode-toggle">
+            <input type="checkbox" v-model="forwardMode" />
+            Forward modeling only
+          </label>
           <button
             class="btn primary"
             :disabled="!canSynthesize || synthesizing || solving"
@@ -266,14 +367,24 @@ onMounted(async () => {
             {{ synthesizing ? 'Synthesizing...' : 'Synthesize' }}
           </button>
           <button
+            v-if="!forwardMode"
             class="btn primary"
-            :disabled="!canSolve || synthesizing || solving"
+            :disabled="!canSolve || synthesizing || solving || runningMCMC"
             @click="handleSolve"
           >
             {{ solving ? 'Solving...' : 'Solve' }}
           </button>
           <button
-            v-if="solving"
+            v-if="!forwardMode"
+            class="btn secondary"
+            :disabled="!canSolve || synthesizing || solving || runningMCMC"
+            @click="handleMCMC"
+            title="Run MCMC parameter estimation for Bayesian uncertainties"
+          >
+            {{ runningMCMC ? 'MCMC...' : 'MCMC' }}
+          </button>
+          <button
+            v-if="solving || runningMCMC"
             class="btn danger"
             @click="handleCancel"
           >
@@ -282,8 +393,8 @@ onMounted(async () => {
         </div>
       </section>
 
-      <section v-if="fitResults" class="section results-section">
-        <FitResults :results="fitResults" />
+      <section v-if="fitResults || mcmcResults" class="section results-section">
+        <FitResults :results="fitResults" :mcmc-results="mcmcResults" />
       </section>
     </main>
 
@@ -431,6 +542,15 @@ body {
   background: var(--primary-dark);
 }
 
+.btn.secondary {
+  background: #6b7280;
+  color: white;
+}
+
+.btn.secondary:hover:not(:disabled) {
+  background: #4b5563;
+}
+
 .btn.danger {
   background: var(--danger);
   color: white;
@@ -438,6 +558,20 @@ body {
 
 .btn.danger:hover:not(:disabled) {
   background: #b91c1c;
+}
+
+.mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  margin-right: 1rem;
+}
+
+.mode-toggle input {
+  width: 16px;
+  height: 16px;
 }
 
 .footer {

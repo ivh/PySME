@@ -23,6 +23,8 @@ export interface FitSettings {
 export interface InstrumentSettings {
   ipres: number | null
   iptype: string
+  vrad: number | null
+  snr: number | null
 }
 
 export interface ContinuumSettings {
@@ -47,6 +49,9 @@ export interface SessionState {
   radial_velocity: RadialVelocitySettings
   abund_pattern: string
   wran: number[][] | null
+  nlte_enabled: boolean
+  fit_abundances: string[]
+  available_elements: string[]
 }
 
 export interface SpectrumData {
@@ -64,6 +69,15 @@ export interface FitResult {
   uncertainties: number[]
   chisq: number
   iterations: number
+}
+
+export interface MCMCResult {
+  parameters: string[]
+  values: number[]
+  uncertainties: number[]
+  uncertainties_low: number[]
+  uncertainties_high: number[]
+  acceptance_fraction: number
 }
 
 export interface LinelistInfo {
@@ -180,6 +194,27 @@ export const api = {
     })
   },
 
+  async updateWaveLimitsMulti(segments: number[][]): Promise<{ status: string; nseg: number }> {
+    return request('/wave-limits/multi', {
+      method: 'PUT',
+      body: JSON.stringify({ segments }),
+    })
+  },
+
+  async updateNLTE(enabled: boolean): Promise<{ status: string; enabled: boolean; elements: string[] }> {
+    return request('/nlte', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    })
+  },
+
+  async updateFitAbundances(elements: string[]): Promise<{ status: string; elements: string[] }> {
+    return request('/fit-abundances', {
+      method: 'PUT',
+      body: JSON.stringify({ elements }),
+    })
+  },
+
   // Spectrum
   async getSpectrum(): Promise<SpectrumData> {
     return request('/spectrum')
@@ -187,6 +222,13 @@ export const api = {
 
   async getSpectrumPlot(segment: number = 0): Promise<object> {
     return request(`/spectrum/plot?segment=${segment}`)
+  },
+
+  async updateMask(segment: number, wl_min: number, wl_max: number, mask_value: number): Promise<{ status: string; modified_points: number }> {
+    return request('/spectrum/mask', {
+      method: 'PUT',
+      body: JSON.stringify({ segment, wl_min, wl_max, mask_value }),
+    })
   },
 
   async loadSpectrum(file: File): Promise<{ status: string; message: string; npoints: number; wl_min: number; wl_max: number }> {
@@ -247,5 +289,26 @@ export const api = {
 
   async getFitResults(): Promise<FitResult | null> {
     return request('/fit-results')
+  },
+
+  // MCMC
+  async runMCMC(
+    parameters: string[],
+    nwalkers: number = 32,
+    nsteps: number = 500,
+    nburn: number = 100
+  ): Promise<{ status: string; message: string }> {
+    return request('/mcmc', {
+      method: 'POST',
+      body: JSON.stringify({ parameters, nwalkers, nsteps, nburn }),
+    })
+  },
+
+  mcmcStream(): EventSource {
+    return new EventSource(`${BASE_URL}/mcmc/stream`)
+  },
+
+  async getMCMCResults(): Promise<MCMCResult | null> {
+    return request('/mcmc/results')
   },
 }

@@ -3,11 +3,25 @@ import { ref, onMounted, watch } from 'vue'
 import Plotly from 'plotly.js-dist-min'
 import { api } from '../api'
 
+const emit = defineEmits<{
+  'mask-updated': []
+}>()
+
 const plotContainer = ref<HTMLDivElement | null>(null)
 const segment = ref(0)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const nseg = ref(0)
+
+const maskEditMode = ref(false)
+const selectedMaskValue = ref(1)
+const selectionRange = ref<{min: number, max: number} | null>(null)
+
+const maskLabels: Record<number, string> = {
+  0: 'Bad',
+  1: 'Line',
+  2: 'Continuum'
+}
 
 async function loadPlot() {
   if (!plotContainer.value) return
@@ -26,22 +40,76 @@ async function loadPlot() {
 
     const plotData = await api.getSpectrumPlot(segment.value)
 
+    const layout = {
+      ...(plotData as any).layout,
+      autosize: true,
+      margin: { l: 60, r: 30, t: 40, b: 50 },
+      height: 400,
+      dragmode: maskEditMode.value ? 'select' : 'zoom',
+    }
+
     await Plotly.react(
       plotContainer.value,
       (plotData as any).data,
-      {
-        ...(plotData as any).layout,
-        autosize: true,
-        margin: { l: 60, r: 30, t: 40, b: 50 },
-        height: 400,
-      },
+      layout,
       { responsive: true }
     )
+
+    if (maskEditMode.value) {
+      setupSelectionHandler()
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load plot'
   } finally {
     loading.value = false
   }
+}
+
+function setupSelectionHandler() {
+  if (!plotContainer.value) return
+
+  (plotContainer.value as any).on('plotly_selected', async (eventData: any) => {
+    if (!eventData || !eventData.range) return
+
+    const xRange = eventData.range.x
+    if (!xRange || xRange.length < 2) return
+
+    selectionRange.value = {
+      min: Math.min(xRange[0], xRange[1]),
+      max: Math.max(xRange[0], xRange[1])
+    }
+  })
+}
+
+async function applyMask() {
+  if (!selectionRange.value) return
+
+  try {
+    await api.updateMask(
+      segment.value,
+      selectionRange.value.min,
+      selectionRange.value.max,
+      selectedMaskValue.value
+    )
+    selectionRange.value = null
+    await loadPlot()
+    emit('mask-updated')
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to update mask'
+  }
+}
+
+function cancelSelection() {
+  selectionRange.value = null
+  if (plotContainer.value) {
+    Plotly.relayout(plotContainer.value, { selections: [] })
+  }
+}
+
+function toggleMaskMode() {
+  maskEditMode.value = !maskEditMode.value
+  selectionRange.value = null
+  loadPlot()
 }
 
 function changeSegment(delta: number) {
@@ -52,6 +120,7 @@ function changeSegment(delta: number) {
 }
 
 watch(segment, () => {
+  selectionRange.value = null
   loadPlot()
 })
 
@@ -64,11 +133,37 @@ onMounted(() => {
   <div class="spectrum-plot">
     <div class="plot-header">
       <h2>Spectrum</h2>
-      <div v-if="nseg > 1" class="segment-controls">
-        <button @click="changeSegment(-1)" :disabled="segment <= 0">Prev</button>
-        <span>Segment {{ segment + 1 }} / {{ nseg }}</span>
-        <button @click="changeSegment(1)" :disabled="segment >= nseg - 1">Next</button>
+      <div class="header-controls">
+        <button
+          type="button"
+          class="mask-toggle"
+          :class="{ active: maskEditMode }"
+          @click="toggleMaskMode"
+        >
+          {{ maskEditMode ? 'Exit mask edit' : 'Edit mask' }}
+        </button>
+        <div v-if="nseg > 1" class="segment-controls">
+          <button @click="changeSegment(-1)" :disabled="segment <= 0">Prev</button>
+          <span>Segment {{ segment + 1 }} / {{ nseg }}</span>
+          <button @click="changeSegment(1)" :disabled="segment >= nseg - 1">Next</button>
+        </div>
       </div>
+    </div>
+
+    <div v-if="maskEditMode" class="mask-controls">
+      <span class="mask-instruction">Select a region on the plot, then set mask value:</span>
+      <select v-model.number="selectedMaskValue" class="mask-select">
+        <option :value="0">Bad (0)</option>
+        <option :value="1">Line (1)</option>
+        <option :value="2">Continuum (2)</option>
+      </select>
+      <template v-if="selectionRange">
+        <span class="selection-info">
+          Selected: {{ selectionRange.min.toFixed(2) }} - {{ selectionRange.max.toFixed(2) }} A
+        </span>
+        <button type="button" class="btn-apply" @click="applyMask">Apply</button>
+        <button type="button" class="btn-cancel" @click="cancelSelection">Cancel</button>
+      </template>
     </div>
 
     <div v-if="error" class="error">{{ error }}</div>
@@ -94,6 +189,31 @@ onMounted(() => {
   font-size: 1.1rem;
   color: var(--text);
   margin: 0;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.mask-toggle {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.mask-toggle:hover {
+  background: var(--bg);
+}
+
+.mask-toggle.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
 }
 
 .segment-controls {
@@ -123,6 +243,63 @@ onMounted(() => {
 .segment-controls span {
   font-size: 0.9rem;
   color: var(--text-muted);
+}
+
+.mask-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: #f0f7ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.mask-instruction {
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.mask-select {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.selection-info {
+  font-size: 0.85rem;
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.btn-apply {
+  padding: 0.3rem 0.75rem;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.btn-apply:hover {
+  background: var(--primary-dark);
+}
+
+.btn-cancel {
+  padding: 0.3rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.btn-cancel:hover {
+  background: var(--bg);
 }
 
 .plot-container {
