@@ -35,7 +35,7 @@ fmt = PlotColors()
 try:
     import htmlmin
 except ImportError:
-    logger.info("Install htmlmin for minified html files")
+    logger.debug("Install htmlmin for minified html files")
     htmlmin = None
 
 if in_notebook:
