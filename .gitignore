@@ -168,3 +168,7 @@ local/
 atmo_ml/
 
 src/pysme/lib
+
+# Frontend build artifacts
+src/pysme/gui/frontend/node_modules/
+src/pysme/gui/frontend/dist/
