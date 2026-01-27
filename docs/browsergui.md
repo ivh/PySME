@@ -26,7 +26,7 @@ User runs: pysme gui
 
 ## Current Status
 
-### Completed (v0.1)
+### Completed (v0.2)
 
 - [x] **Backend Foundation**
   - FastAPI server with CORS support
@@ -38,24 +38,34 @@ User runs: pysme gui
   - Session: new, load, save, get state
   - Parameters: get/update stellar params, fit settings, instrument, continuum, RV
   - Abundance pattern selection (Asplund 2021/2009, Grevesse 2007, Lodders 2003)
-  - Wavelength limits
-  - Spectrum: load (FITS/CSV), get data, get Plotly plot
+  - Wavelength limits (single and multi-segment)
+  - Spectrum: load (FITS/CSV), get data, get Plotly plot, update mask
   - Linelist: load VALD files
   - Synthesis: run synthesis
   - Solving: run with SSE progress streaming, cancel
+  - NLTE: enable/disable for 16 elements
+  - Abundance fitting: select elements to fit
+  - MCMC: run MCMC with SSE progress, get results
 
 - [x] **Frontend (Vue 3 + Vite)**
   - File controls (new session, load .sme, load spectrum, load linelist, save)
   - Interactive spectrum plot with Plotly.js
   - Parameter form with websme-style layout:
-    - Instr. specs & Source (resolution, SNR, Vrad)
+    - Instr. specs & Source (resolution, SNR, Vrad) - all connected to backend
     - Stellar parameters with fit checkboxes (Teff, logg, monh, Vmic, Vmac, Vsini)
+    - Element abundance fitting (clickable chips for elements in linelist)
     - Solar ref. composition (radio buttons)
     - Linelist upload
-    - Wavelength limits
-    - Options (NLTE, retain continuum)
+    - Multi-segment wavelength limits (add/remove segments)
+    - Options (NLTE toggle, retain continuum)
+  - Forward modeling mode toggle (hides fit controls for synthesis-only use)
+  - Interactive mask editing (Plotly selection to set bad/line/continuum)
   - Fit results display (chi-squared, parameters with uncertainties)
+  - MCMC results display (medians with asymmetric 16%-84% uncertainties)
   - Status messages and error handling
+
+- [x] **PySME Core**
+  - `SME_MCMC` class in `solve.py` for Bayesian parameter estimation using emcee
 
 - [x] **Build & Distribution**
   - Frontend builds to `gui/static/` via Vite
@@ -64,15 +74,12 @@ User runs: pysme gui
 
 ### Not Yet Implemented
 
-- [ ] NLTE toggle (UI exists, backend integration pending)
-- [ ] SNR handling (UI exists, not used by synthesis yet)
-- [ ] Vrad from form (UI exists, needs to update sme.vrad)
-- [ ] Multi-segment wavelength limits
-- [ ] Mask editing in plot
-- [ ] Element abundance derivation
-- [ ] Built-in linelists (currently user upload only)
-- [ ] Precomputed grid mode
-- [ ] MCMC fitting
+- [ ] Built-in linelists (currently user upload only; requires hosting linelist files)
+- [ ] Precomputed grid mode (for fast parameter searches without full synthesis)
+- [ ] Corner plots for MCMC posteriors
+- [ ] Save/export MCMC samples
+- [ ] Undo/redo for mask edits
+- [ ] Keyboard shortcuts
 
 ## File Structure
 
@@ -122,11 +129,14 @@ POST /api/session/save             → Download .sme file
 GET  /api/params                   → Get stellar parameters
 PUT  /api/params                   → Update parameters
 PUT  /api/fit-settings             → Update which params to fit
-PUT  /api/instrument               → Update resolution, iptype
+PUT  /api/instrument               → Update resolution, iptype, vrad, snr
 PUT  /api/continuum                → Update cscale_flag, cscale_type
 PUT  /api/radial-velocity          → Update vrad_flag
 PUT  /api/abund-pattern            → Update abundance reference
-PUT  /api/wave-limits              → Update wavelength range
+PUT  /api/wave-limits              → Update wavelength range (single segment)
+PUT  /api/wave-limits/multi        → Update wavelength ranges (multiple segments)
+PUT  /api/nlte                     → Enable/disable NLTE
+PUT  /api/fit-abundances           → Set elements to fit abundances for
 ```
 
 ### Spectrum
@@ -134,6 +144,7 @@ PUT  /api/wave-limits              → Update wavelength range
 POST /api/spectrum/load            → Upload observed spectrum (FITS/CSV)
 GET  /api/spectrum                 → Get wave/spec/synth/mask arrays
 GET  /api/spectrum/plot            → Get Plotly JSON figure
+PUT  /api/spectrum/mask            → Update mask in wavelength range
 ```
 
 ### Linelist
@@ -145,10 +156,17 @@ POST /api/linelist/load            → Upload VALD linelist
 ### Synthesis & Fitting
 ```
 POST /api/synthesize               → Run synthesis
-POST /api/solve                    → Start parameter fitting
+POST /api/solve                    → Start least-squares fitting
 GET  /api/solve/stream             → SSE for fit progress
 POST /api/solve/cancel             → Cancel running fit
 GET  /api/fit-results              → Get fit results
+```
+
+### MCMC
+```
+POST /api/mcmc                     → Start MCMC parameter estimation
+GET  /api/mcmc/stream              → SSE for MCMC progress
+GET  /api/mcmc/results             → Get MCMC results (medians, uncertainties)
 ```
 
 ## Usage

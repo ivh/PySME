@@ -172,3 +172,4 @@ src/pysme/lib
 # Frontend build artifacts
 src/pysme/gui/frontend/node_modules/
 src/pysme/gui/frontend/dist/
+docs/websme-reference/
