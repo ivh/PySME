@@ -431,6 +431,11 @@ class FinalPlot:
                     ]
                 annotations[seg] = seg_annotations
 
+        # Ensure all segments have an annotations entry
+        for seg in range(self.nsegments):
+            if seg not in annotations:
+                annotations[seg] = []
+
         self.visible = visible
         self.line_mask_idx = line_mask_idx
         self.cont_mask_idx = cont_mask_idx
