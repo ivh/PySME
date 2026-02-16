@@ -1,7 +1,7 @@
 {
     "nso.bin": [
         "https://nadc.china-vo.org/res/file_upload/download?id=53693",
-        "atlas/nso.bin"
+        "atlases/nso.bin"
     ],
     "atlas12.sav": [
         "https://nadc.china-vo.org/res/file_upload/download?id=53705",
