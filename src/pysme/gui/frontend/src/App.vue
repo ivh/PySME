@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { api, type SessionState, type StellarParams, type FitSettings, type FitResult, type MCMCResult, type InstrumentSettings, type ContinuumSettings } from './api'
+import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
+import { api, type SessionState, type StellarParams, type FitSettings, type FitResult, type MCMCResult, type InstrumentSettings, type ContinuumSettings, type LogEntry } from './api'
 import SpectrumPlot from './components/SpectrumPlot.vue'
 import ParameterForm from './components/ParameterForm.vue'
 import FileControls from './components/FileControls.vue'
@@ -17,6 +17,10 @@ const mcmcResults = ref<MCMCResult | null>(null)
 const plotKey = ref(0)
 const forwardMode = ref(false)
 const runningMCMC = ref(false)
+const logMessages = ref<Array<{ level: string; message: string }>>([])
+const logExpanded = ref(false)
+const logPanel = ref<HTMLDivElement | null>(null)
+let logEventSource: EventSource | null = null
 
 const hasData = computed(() => session.value?.has_observation || session.value?.has_synthetic)
 const canSynthesize = computed(() => session.value?.has_linelist)
@@ -147,6 +151,7 @@ async function handleSynthesize() {
   synthesizing.value = true
   error.value = null
   status.value = 'Synthesizing spectrum...'
+  logExpanded.value = true
   try {
     await api.synthesize()
     await refreshSession()
@@ -180,6 +185,7 @@ async function handleSolve() {
   solving.value = true
   error.value = null
   status.value = 'Starting fit...'
+  logExpanded.value = true
 
   try {
     await api.solve(fitParams)
@@ -250,6 +256,7 @@ async function handleMCMC() {
   runningMCMC.value = true
   error.value = null
   status.value = 'Starting MCMC...'
+  logExpanded.value = true
 
   try {
     await api.runMCMC(fitParams)
@@ -289,8 +296,43 @@ async function handleMCMC() {
   }
 }
 
+function handleSetWaveFromView(limits: { wl_min: number; wl_max: number }) {
+  handleWaveLimitsChanged(limits)
+}
+
+function startLogStream() {
+  if (logEventSource) return
+  logEventSource = api.logsStream()
+  logEventSource.onmessage = (event) => {
+    const data = JSON.parse(event.data)
+    if (data.type === 'log') {
+      logMessages.value.push({ level: data.level, message: data.message })
+      if (logMessages.value.length > 500) {
+        logMessages.value = logMessages.value.slice(-500)
+      }
+      nextTick(() => {
+        if (logPanel.value) {
+          logPanel.value.scrollTop = logPanel.value.scrollHeight
+        }
+      })
+    }
+  }
+}
+
+function stopLogStream() {
+  if (logEventSource) {
+    logEventSource.close()
+    logEventSource = null
+  }
+}
+
 onMounted(async () => {
   await refreshSession()
+  startLogStream()
+})
+
+onBeforeUnmount(() => {
+  stopLogStream()
 })
 </script>
 
@@ -322,7 +364,7 @@ onMounted(async () => {
       </section>
 
       <section v-if="hasData" class="section plot-section">
-        <SpectrumPlot :key="plotKey" />
+        <SpectrumPlot :key="plotKey" @set-wave-from-view="handleSetWaveFromView" />
       </section>
 
       <section v-if="session" class="section params-section">
@@ -395,6 +437,28 @@ onMounted(async () => {
 
       <section v-if="fitResults || mcmcResults" class="section results-section">
         <FitResults :results="fitResults" :mcmc-results="mcmcResults" />
+      </section>
+
+      <section class="section log-section">
+        <div class="log-header" @click="logExpanded = !logExpanded">
+          <h2>Log Console</h2>
+          <div class="log-header-right">
+            <span v-if="logMessages.length > 0" class="log-count">{{ logMessages.length }} messages</span>
+            <span class="log-toggle">{{ logExpanded ? 'Collapse' : 'Expand' }}</span>
+          </div>
+        </div>
+        <div v-if="logExpanded" ref="logPanel" class="log-panel">
+          <div
+            v-for="(msg, i) in logMessages"
+            :key="i"
+            class="log-entry"
+            :class="'log-' + msg.level.toLowerCase()"
+          >
+            <span class="log-level">{{ msg.level }}</span>
+            <span class="log-message">{{ msg.message }}</span>
+          </div>
+          <div v-if="logMessages.length === 0" class="log-empty">No log messages yet.</div>
+        </div>
       </section>
     </main>
 
@@ -572,6 +636,100 @@ body {
 .mode-toggle input {
   width: 16px;
   height: 16px;
+}
+
+.log-section {
+  padding: 0;
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.log-header:hover {
+  background: var(--bg);
+}
+
+.log-header h2 {
+  font-size: 1rem;
+  color: var(--text);
+  margin: 0;
+}
+
+.log-header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.log-count {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.log-toggle {
+  font-size: 0.85rem;
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.log-panel {
+  max-height: 300px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 0.5rem;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 0.8rem;
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.log-entry {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  line-height: 1.4;
+}
+
+.log-level {
+  flex-shrink: 0;
+  width: 55px;
+  font-weight: 600;
+  text-align: right;
+}
+
+.log-message {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-info .log-level {
+  color: #93c5fd;
+}
+
+.log-debug .log-level {
+  color: #94a3b8;
+}
+
+.log-warning .log-level {
+  color: #fbbf24;
+}
+
+.log-error .log-level,
+.log-critical .log-level {
+  color: #f87171;
+}
+
+.log-empty {
+  color: #64748b;
+  padding: 1rem;
+  text-align: center;
+  font-style: italic;
 }
 
 .footer {

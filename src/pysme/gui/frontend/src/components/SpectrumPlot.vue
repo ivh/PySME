@@ -5,6 +5,7 @@ import { api } from '../api'
 
 const emit = defineEmits<{
   'mask-updated': []
+  'set-wave-from-view': [limits: { wl_min: number; wl_max: number }]
 }>()
 
 const plotContainer = ref<HTMLDivElement | null>(null)
@@ -16,6 +17,8 @@ const nseg = ref(0)
 const maskEditMode = ref(false)
 const selectedMaskValue = ref(1)
 const selectionRange = ref<{min: number, max: number} | null>(null)
+
+const currentXRange = ref<{ min: number; max: number } | null>(null)
 
 const maskLabels: Record<number, string> = {
   0: 'Bad',
@@ -54,6 +57,17 @@ async function loadPlot() {
       layout,
       { responsive: true }
     )
+
+    ;(plotContainer.value as any).on('plotly_relayout', (eventData: any) => {
+      if (eventData['xaxis.range[0]'] !== undefined && eventData['xaxis.range[1]'] !== undefined) {
+        currentXRange.value = {
+          min: eventData['xaxis.range[0]'],
+          max: eventData['xaxis.range[1]'],
+        }
+      } else if (eventData['xaxis.autorange']) {
+        currentXRange.value = null
+      }
+    })
 
     if (maskEditMode.value) {
       setupSelectionHandler()
@@ -106,6 +120,15 @@ function cancelSelection() {
   }
 }
 
+function setWaveFromView() {
+  if (currentXRange.value) {
+    emit('set-wave-from-view', {
+      wl_min: currentXRange.value.min,
+      wl_max: currentXRange.value.max,
+    })
+  }
+}
+
 function toggleMaskMode() {
   maskEditMode.value = !maskEditMode.value
   selectionRange.value = null
@@ -134,6 +157,15 @@ onMounted(() => {
     <div class="plot-header">
       <h2>Spectrum</h2>
       <div class="header-controls">
+        <button
+          v-if="currentXRange"
+          type="button"
+          class="btn-set-range"
+          @click="setWaveFromView"
+          title="Set wavelength limits from the current plot view"
+        >
+          Use current view ({{ currentXRange.min.toFixed(1) }}-{{ currentXRange.max.toFixed(1) }} A)
+        </button>
         <button
           type="button"
           class="mask-toggle"
@@ -195,6 +227,21 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 1rem;
+}
+
+.btn-set-range {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--primary);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.btn-set-range:hover {
+  background: #f0f7ff;
 }
 
 .mask-toggle {

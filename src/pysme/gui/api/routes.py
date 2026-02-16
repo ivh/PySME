@@ -7,6 +7,7 @@ import json
 import logging
 import tempfile
 import threading
+import time as _time
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,7 @@ from ...solve import SME_Solver
 from .models import (
     AbundanceFitSettings,
     AbundPatternUpdate,
+    BuiltinLinelistRequest,
     ContinuumSettings,
     FitResult,
     FitSettings,
@@ -43,6 +45,27 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
+LINELIST_DIR = Path(__file__).parent.parent / "data" / "linelists"
+
+
+class _SessionLogHandler(logging.Handler):
+    """Captures log messages into the session's log buffer."""
+
+    def __init__(self, session_ref):
+        super().__init__()
+        self._session = session_ref
+
+    def emit(self, record):
+        try:
+            self._session.log_entries.append({
+                "type": "log",
+                "time": _time.time(),
+                "level": record.levelname,
+                "message": self.format(record),
+            })
+        except Exception:
+            pass
+
 
 class Session:
     """In-memory session holding the current SME_Structure."""
@@ -64,6 +87,16 @@ class Session:
         self.mcmc_done: bool = False
         self.mcmc_error: Optional[str] = None
         self.mcmc_results: Optional[dict] = None
+        self.log_entries: list[dict] = []
+        self._setup_log_capture()
+
+    def _setup_log_capture(self):
+        handler = _SessionLogHandler(self)
+        handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
+        handler.setLevel(logging.DEBUG)
+        pysme_logger = logging.getLogger("pysme")
+        pysme_logger.addHandler(handler)
+        pysme_logger.setLevel(logging.INFO)
 
     def reset(self):
         self.sme = None
@@ -71,6 +104,7 @@ class Session:
         self.abund_pattern = "asplund2021"
         self.nlte_enabled = False
         self.fit_abundances = []
+        self.log_entries.clear()
         self.cancel_solve()
         self.cancel_mcmc()
 
@@ -132,6 +166,78 @@ async def load_session(file: UploadFile = File(...)):
     except Exception as e:
         logger.exception("Failed to load file")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/session/load-test")
+async def load_test_spectrum():
+    """Load a test setup with solar-like parameters."""
+    from ...abund import Abund
+
+    session.reset()
+    sme = SME_Structure()
+    sme.teff = 5778
+    sme.logg = 4.44
+    sme.monh = 0.0
+    sme.vmic = 1.0
+    sme.vmac = 2.0
+    sme.vsini = 2.0
+    sme.abund = Abund(monh=0.0, pattern="asplund2021")
+    sme.wran = np.array([[5160, 5190]])
+    sme.ipres = 50000
+    sme.iptype = "gauss"
+
+    session.sme = sme
+    session.filename = "test_spectrum"
+
+    return {"status": "ok", "message": "Test spectrum loaded with solar parameters (5160-5190 A)"}
+
+
+@router.post("/session/load-solar")
+async def load_solar_spectrum():
+    """Load the NSO solar atlas as observed spectrum."""
+    from ...nso import load_solar_spectrum as _load_solar
+    from ...abund import Abund
+    from ...iliffe_vector import Iliffe_vector
+
+    try:
+        wave, flux = _load_solar()
+
+        session.reset()
+        sme = SME_Structure()
+        sme.teff = 5778
+        sme.logg = 4.44
+        sme.monh = 0.0
+        sme.vmic = 1.0
+        sme.vmac = 2.0
+        sme.vsini = 2.0
+        sme.abund = Abund(monh=0.0, pattern="asplund2021")
+
+        # Default window
+        wl_min, wl_max = 5160.0, 5190.0
+        mask = (wave >= wl_min) & (wave <= wl_max)
+        w = wave[mask]
+        f = flux[mask]
+
+        sme.wave = Iliffe_vector([w])
+        sme.spec = Iliffe_vector([f])
+        sme.mask = Iliffe_vector([np.ones_like(f, dtype=int)])
+        sme.wran = np.array([[wl_min, wl_max]])
+        sme.ipres = 350000
+        sme.iptype = "gauss"
+
+        session.sme = sme
+        session.filename = "nso_solar_atlas"
+
+        return {
+            "status": "ok",
+            "message": f"NSO solar atlas loaded ({wl_min}-{wl_max} A, {len(w)} points)",
+            "npoints": len(w),
+            "wl_min": float(w.min()),
+            "wl_max": float(w.max()),
+        }
+    except Exception as e:
+        logger.exception("Failed to load solar spectrum")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/session", response_model=SessionState)
@@ -561,10 +667,53 @@ async def load_spectrum(file: UploadFile = File(...)):
 @router.get("/linelists")
 async def list_linelists():
     """List available built-in linelists."""
-    linelists = [
-        {"name": "vald", "description": "VALD linelist (user upload)"},
-    ]
+    linelists = []
+
+    if LINELIST_DIR.exists():
+        for f in sorted(LINELIST_DIR.iterdir()):
+            if f.suffix.lower() in (".lin", ".vald", ".txt"):
+                linelists.append({
+                    "name": f.stem,
+                    "filename": f.name,
+                    "description": f.stem.replace("_", " "),
+                    "builtin": True,
+                })
+
     return {"linelists": linelists}
+
+
+@router.post("/linelist/load-builtin")
+async def load_builtin_linelist(request: BuiltinLinelistRequest):
+    """Load a built-in linelist by name."""
+    if session.sme is None:
+        raise HTTPException(status_code=400, detail="No session loaded")
+
+    linelist_path = None
+    if LINELIST_DIR.exists():
+        for ext in ["", ".lin", ".vald", ".txt"]:
+            candidate = LINELIST_DIR / (request.name + ext)
+            if candidate.exists():
+                linelist_path = candidate
+                break
+
+    if linelist_path is None:
+        raise HTTPException(status_code=404, detail=f"Linelist not found: {request.name}")
+
+    try:
+        from ...linelist.vald import ValdFile
+
+        linelist = ValdFile(str(linelist_path))
+        session.sme.linelist = linelist
+
+        return LinelistInfo(
+            name=request.name,
+            nlines=len(linelist),
+            wl_min=float(linelist.wlcent.min()),
+            wl_max=float(linelist.wlcent.max()),
+        )
+    except Exception as e:
+        logger.exception("Failed to load built-in linelist")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/linelist/load")
@@ -839,3 +988,19 @@ async def get_mcmc_results():
         uncertainties_high=session.mcmc_results.get("uncertainties_high", []),
         acceptance_fraction=session.mcmc_results.get("acceptance_fraction", 0),
     )
+
+
+@router.get("/logs/stream")
+async def logs_stream():
+    """Stream log messages via Server-Sent Events."""
+
+    async def event_generator():
+        index = len(session.log_entries)
+        while True:
+            while index < len(session.log_entries):
+                entry = session.log_entries[index]
+                yield f"data: {json.dumps(entry)}\n\n"
+                index += 1
+            await asyncio.sleep(0.3)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

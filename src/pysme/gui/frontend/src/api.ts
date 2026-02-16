@@ -87,6 +87,20 @@ export interface LinelistInfo {
   wl_max: number
 }
 
+export interface BuiltinLinelist {
+  name: string
+  filename: string
+  description: string
+  builtin: boolean
+}
+
+export interface LogEntry {
+  type: string
+  level: string
+  message: string
+  time: number
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -129,6 +143,14 @@ export const api = {
 
   async getSession(): Promise<SessionState> {
     return request('/session')
+  },
+
+  async loadTestSpectrum(): Promise<{ status: string; message: string }> {
+    return request('/session/load-test', { method: 'POST' })
+  },
+
+  async loadSolarSpectrum(): Promise<{ status: string; message: string }> {
+    return request('/session/load-solar', { method: 'POST' })
   },
 
   async saveSession(): Promise<Blob> {
@@ -262,6 +284,22 @@ export const api = {
       throw new Error(error.detail || 'Upload failed')
     }
     return response.json()
+  },
+
+  async getAvailableLinelists(): Promise<{ linelists: BuiltinLinelist[] }> {
+    return request('/linelists')
+  },
+
+  async loadBuiltinLinelist(name: string): Promise<LinelistInfo> {
+    return request('/linelist/load-builtin', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    })
+  },
+
+  // Logs
+  logsStream(): EventSource {
+    return new EventSource(`${BASE_URL}/logs/stream`)
   },
 
   // Synthesis and solving

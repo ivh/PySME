@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onMounted } from 'vue'
 import { api } from '../api'
-import type { StellarParams, FitSettings, InstrumentSettings, ContinuumSettings, RadialVelocitySettings } from '../api'
+import type { StellarParams, FitSettings, InstrumentSettings, ContinuumSettings, RadialVelocitySettings, BuiltinLinelist } from '../api'
 
 const props = defineProps<{
   params: StellarParams
@@ -52,6 +52,16 @@ const retainContinuum = ref(false)
 
 const linelistFileInput = ref<HTMLInputElement | null>(null)
 const selectedLinelist = ref('user')
+const builtinLinelists = ref<BuiltinLinelist[]>([])
+
+onMounted(async () => {
+  try {
+    const result = await api.getAvailableLinelists()
+    builtinLinelists.value = result.linelists
+  } catch {
+    // built-in linelists are optional
+  }
+})
 
 watch(() => props.params, (newParams) => {
   localParams.value = { ...newParams }
@@ -185,6 +195,16 @@ async function handleLinelistFileSelect(event: Event) {
     emit('error', e instanceof Error ? e.message : 'Failed to load linelist')
   } finally {
     input.value = ''
+  }
+}
+
+async function handleBuiltinLinelistSelect(name: string) {
+  selectedLinelist.value = name
+  try {
+    await api.loadBuiltinLinelist(name)
+    emit('linelist-loaded')
+  } catch (e) {
+    emit('error', e instanceof Error ? e.message : 'Failed to load linelist')
   }
 }
 
@@ -328,6 +348,20 @@ const linelistOptions = [
 
         <h3>Linelist</h3>
         <div class="radio-list">
+          <label
+            v-for="ll in builtinLinelists"
+            :key="ll.name"
+            class="radio-row"
+          >
+            <input
+              type="radio"
+              name="linelist"
+              :value="ll.name"
+              :checked="selectedLinelist === ll.name"
+              @change="handleBuiltinLinelistSelect(ll.name)"
+            />
+            {{ ll.description }}
+          </label>
           <label class="radio-row upload-row">
             <input
               type="radio"

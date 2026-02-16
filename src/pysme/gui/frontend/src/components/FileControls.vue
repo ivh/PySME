@@ -69,6 +69,30 @@ async function handleLinelistFileSelect(event: Event) {
   }
 }
 
+async function handleLoadTest() {
+  uploading.value = true
+  try {
+    await api.loadTestSpectrum()
+    emit('file-loaded')
+  } catch (e) {
+    emit('error', e instanceof Error ? e.message : 'Failed to load test spectrum')
+  } finally {
+    uploading.value = false
+  }
+}
+
+async function handleLoadSolar() {
+  uploading.value = true
+  try {
+    await api.loadSolarSpectrum()
+    emit('file-loaded')
+  } catch (e) {
+    emit('error', e instanceof Error ? e.message : 'Failed to load solar spectrum')
+  } finally {
+    uploading.value = false
+  }
+}
+
 async function handleSave() {
   try {
     const blob = await api.saveSession()
@@ -135,6 +159,14 @@ async function handleSave() {
         :disabled="loading || uploading"
       >
         Load Linelist (VALD)
+      </button>
+
+      <button class="btn" @click="handleLoadTest" :disabled="loading || uploading">
+        Load Test Spectrum
+      </button>
+
+      <button class="btn" @click="handleLoadSolar" :disabled="loading || uploading">
+        Load Solar Spectrum
       </button>
 
       <button class="btn" @click="handleSave" :disabled="loading || uploading">

@@ -173,6 +173,12 @@ class LinelistInfo(BaseModel):
     wl_max: float
 
 
+class BuiltinLinelistRequest(BaseModel):
+    """Request to load a built-in linelist."""
+
+    name: str = Field(..., description="Name of the built-in linelist file")
+
+
 class ErrorResponse(BaseModel):
     """Error response."""
 
