@@ -1183,7 +1183,13 @@ class NLTE(Collection):
         for elem in self.elements:
             # Call function to retrieve interpolated NLTE departure coefficients
             # the abundances for NLTE are handled in the H-12 format
-            grid = self.get_grid(sme, elem, lfs_nlte)
+            try:
+                grid = self.get_grid(sme, elem, lfs_nlte)
+            except (OSError, TimeoutError, ConnectionError) as e:
+                raise RuntimeError(
+                    f"Failed to download NLTE grid for {elem}: {e}. "
+                    f"Disable NLTE or try again later."
+                ) from e
 
             if not np.any(grid.iused):
                 # No lines are found for this element
