@@ -87,13 +87,17 @@ watch(() => props.continuum, (newSettings) => {
   retainContinuum.value = newSettings.cscale_flag === 'none'
 }, { deep: true })
 
+watch(() => props.hasLinelist, (has) => {
+  if (!has) {
+    selectedLinelist.value = 'user'
+  }
+})
+
 watch(() => props.waveRange, (range) => {
-  if (range && localWlMin.value === null) {
+  if (range) {
     localWlMin.value = range[0]
     localWlMax.value = range[1]
-    if (waveSegments.value.length === 0) {
-      waveSegments.value = [{ min: range[0], max: range[1] }]
-    }
+    waveSegments.value = [{ min: range[0], max: range[1] }]
   }
 })
 

@@ -182,14 +182,14 @@ async def load_test_spectrum():
     sme.vmac = 2.0
     sme.vsini = 2.0
     sme.abund = Abund(monh=0.0, pattern="asplund2021")
-    sme.wran = np.array([[5160, 5190]])
+    sme.wran = np.array([[6436, 6444]])
     sme.ipres = 50000
     sme.iptype = "gauss"
 
     session.sme = sme
     session.filename = "test_spectrum"
 
-    return {"status": "ok", "message": "Test spectrum loaded with solar parameters (5160-5190 A)"}
+    return {"status": "ok", "message": "Test spectrum loaded with solar parameters (6436-6444 A)"}
 
 
 @router.post("/session/load-solar")
@@ -212,8 +212,8 @@ async def load_solar_spectrum():
         sme.vsini = 2.0
         sme.abund = Abund(monh=0.0, pattern="asplund2021")
 
-        # Default window
-        wl_min, wl_max = 5160.0, 5190.0
+        # Default window (matches bundled solar linelist)
+        wl_min, wl_max = 6436.0, 6444.0
         mask = (wave >= wl_min) & (wave <= wl_max)
         w = wave[mask]
         f = flux[mask]
@@ -882,6 +882,8 @@ async def get_fit_results():
         return None
 
     fr = session.sme.fitresults
+    if fr.parameters is None or len(fr.parameters) == 0:
+        return None
     return FitResult(
         parameters=list(fr.parameters) if fr.parameters is not None else [],
         values=[float(v) for v in fr.values] if fr.values is not None else [],
