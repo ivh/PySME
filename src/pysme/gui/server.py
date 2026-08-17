@@ -3,6 +3,7 @@
 
 import logging
 import webbrowser
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -17,12 +18,21 @@ def create_app():
     from fastapi.responses import FileResponse
     from fastapi.middleware.cors import CORSMiddleware
 
-    from .api.routes import router
+    from .api.routes import router, session
+
+    @asynccontextmanager
+    async def lifespan(app):
+        # Start the computation worker now, so the first synthesis does not wait
+        # for a fresh interpreter to import PySME.
+        session.jobs.prewarm()
+        yield
+        session.jobs.shutdown()
 
     app = FastAPI(
         title="PySME GUI",
         description="Web interface for PySME spectral analysis",
         version="0.5.0",
+        lifespan=lifespan,
     )
 
     app.add_middleware(
@@ -83,7 +93,15 @@ def run_server(host: str = "127.0.0.1", port: int = 8000, open_browser: bool = T
     print(f"Starting PySME GUI at http://{host}:{port}")
     print("Press Ctrl+C to stop the server")
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # Bounded graceful shutdown: the progress and log streams never end on their
+    # own, so Ctrl+C would otherwise wait for the browser to close them.
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        timeout_graceful_shutdown=5,
+    )
 
 
 def main():

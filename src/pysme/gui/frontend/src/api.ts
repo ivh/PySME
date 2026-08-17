@@ -325,6 +325,11 @@ export const api = {
     return request('/solve/cancel', { method: 'POST' })
   },
 
+  // Kills whatever is running (synthesis, fit or MCMC)
+  async cancelJob(): Promise<{ status: string; message: string }> {
+    return request('/cancel', { method: 'POST' })
+  },
+
   async getFitResults(): Promise<FitResult | null> {
     return request('/fit-results')
   },

@@ -1102,7 +1102,12 @@ class SME_MCMC:
         self.nburn = nburn
         self.param_names = []
         self.bounds = []
-        self.synthesizer = Synthesizer(config=setup_lfs())
+        self.config, self.lfs_atmo, self.lfs_nlte = setup_lfs()
+        self.synthesizer = Synthesizer(
+            config=self.config,
+            lfs_atmo=self.lfs_atmo,
+            lfs_nlte=self.lfs_nlte,
+        )
         self.sampler = None
         self.iteration = 0
 

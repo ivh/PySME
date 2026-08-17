@@ -17,6 +17,7 @@ const mcmcResults = ref<MCMCResult | null>(null)
 const plotKey = ref(0)
 const forwardMode = ref(false)
 const runningMCMC = ref(false)
+const cancelling = ref(false)
 const logMessages = ref<Array<{ level: string; message: string }>>([])
 const logExpanded = ref(false)
 const logPanel = ref<HTMLDivElement | null>(null)
@@ -149,19 +150,25 @@ async function handleFitAbundancesChanged(elements: string[]) {
 
 async function handleSynthesize() {
   synthesizing.value = true
+  cancelling.value = false
   error.value = null
   status.value = 'Synthesizing spectrum...'
   logExpanded.value = true
   try {
-    await api.synthesize()
-    await refreshSession()
-    plotKey.value++
-    status.value = 'Synthesis complete'
+    const result = await api.synthesize()
+    if (result.status === 'cancelled') {
+      status.value = 'Synthesis cancelled'
+    } else {
+      await refreshSession()
+      plotKey.value++
+      status.value = 'Synthesis complete'
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Synthesis failed'
     status.value = null
   } finally {
     synthesizing.value = false
+    cancelling.value = false
   }
 }
 
@@ -183,6 +190,7 @@ async function handleSolve() {
   }
 
   solving.value = true
+  cancelling.value = false
   error.value = null
   status.value = 'Starting fit...'
   logExpanded.value = true
@@ -196,21 +204,26 @@ async function handleSolve() {
       const data = JSON.parse(event.data)
 
       if (data.type === 'progress') {
-        status.value = `Fitting... iteration ${data.iteration}`
+        if (!cancelling.value) {
+          status.value = `Fitting... iteration ${data.iteration}`
+        }
       } else if (data.type === 'done') {
         eventSource.close()
         solving.value = false
+        cancelling.value = false
         await refreshSession()
         plotKey.value++
         status.value = `Fit complete (chi-sq: ${data.chisq?.toFixed(3) || 'N/A'})`
       } else if (data.type === 'error') {
         eventSource.close()
         solving.value = false
+        cancelling.value = false
         error.value = data.message
         status.value = null
       } else if (data.type === 'cancelled') {
         eventSource.close()
         solving.value = false
+        cancelling.value = false
         status.value = 'Fit cancelled'
       }
     }
@@ -229,9 +242,12 @@ async function handleSolve() {
 }
 
 async function handleCancel() {
+  cancelling.value = true
+  status.value = 'Cancelling...'
   try {
-    await api.cancelSolve()
+    await api.cancelJob()
   } catch (e) {
+    cancelling.value = false
     error.value = e instanceof Error ? e.message : 'Failed to cancel'
   }
 }
@@ -254,6 +270,7 @@ async function handleMCMC() {
   }
 
   runningMCMC.value = true
+  cancelling.value = false
   error.value = null
   status.value = 'Starting MCMC...'
   logExpanded.value = true
@@ -267,10 +284,13 @@ async function handleMCMC() {
       const data = JSON.parse(event.data)
 
       if (data.type === 'progress') {
-        status.value = `MCMC... step ${data.iteration}`
+        if (!cancelling.value) {
+          status.value = `MCMC... step ${data.iteration}`
+        }
       } else if (data.type === 'done') {
         eventSource.close()
         runningMCMC.value = false
+        cancelling.value = false
         await refreshSession()
         plotKey.value++
         const acc = data.acceptance_fraction ? (data.acceptance_fraction * 100).toFixed(1) : 'N/A'
@@ -278,8 +298,14 @@ async function handleMCMC() {
       } else if (data.type === 'error') {
         eventSource.close()
         runningMCMC.value = false
+        cancelling.value = false
         error.value = data.message
         status.value = null
+      } else if (data.type === 'cancelled') {
+        eventSource.close()
+        runningMCMC.value = false
+        cancelling.value = false
+        status.value = 'MCMC cancelled'
       }
     }
 
@@ -403,7 +429,7 @@ onBeforeUnmount(() => {
           </label>
           <button
             class="btn primary"
-            :disabled="!canSynthesize || synthesizing || solving"
+            :disabled="!canSynthesize || synthesizing || solving || runningMCMC"
             @click="handleSynthesize"
           >
             {{ synthesizing ? 'Synthesizing...' : 'Synthesize' }}
@@ -426,11 +452,13 @@ onBeforeUnmount(() => {
             {{ runningMCMC ? 'MCMC...' : 'MCMC' }}
           </button>
           <button
-            v-if="solving || runningMCMC"
+            v-if="synthesizing || solving || runningMCMC"
             class="btn danger"
+            :disabled="cancelling"
             @click="handleCancel"
+            title="Stop the running computation"
           >
-            Cancel
+            {{ cancelling ? 'Cancelling...' : 'Cancel' }}
           </button>
         </div>
       </section>

@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import tempfile
-import threading
 import time as _time
 from pathlib import Path
 from typing import Optional
@@ -16,8 +15,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ...sme import SME_Structure
-from ...synthesize import synthesize_spectrum
-from ...solve import SME_Solver
+from .jobs import JobRunner
 from .models import (
     AbundanceFitSettings,
     AbundPatternUpdate,
@@ -76,18 +74,9 @@ class Session:
         self.abund_pattern: str = "asplund2021"
         self.nlte_enabled: bool = False
         self.fit_abundances: list[str] = []
-        self.solver: Optional[SME_Solver] = None
-        self.solve_task: Optional[threading.Thread] = None
-        self.solve_cancelled: bool = False
-        self.solve_progress: list[dict] = []
-        self.solve_done: bool = False
-        self.solve_error: Optional[str] = None
-        self.mcmc_runner = None
-        self.mcmc_task: Optional[threading.Thread] = None
-        self.mcmc_done: bool = False
-        self.mcmc_error: Optional[str] = None
         self.mcmc_results: Optional[dict] = None
         self.log_entries: list[dict] = []
+        self.jobs = JobRunner(on_log=self._add_log, on_result=self._apply_result)
         self._setup_log_capture()
 
     def _setup_log_capture(self):
@@ -98,38 +87,55 @@ class Session:
         pysme_logger.addHandler(handler)
         pysme_logger.setLevel(logging.INFO)
 
+    def _add_log(self, entry: dict):
+        """Log line forwarded from the worker process."""
+        self.log_entries.append(
+            {
+                "type": "log",
+                "time": _time.time(),
+                "level": entry.get("level", "INFO"),
+                "message": entry.get("message", ""),
+            }
+        )
+
+    def _apply_result(self, job, sme: SME_Structure):
+        """Adopt the result of a finished job (runs on the job thread)."""
+        self.sme = sme
+        if job.kind == "mcmc":
+            self.mcmc_results = job.result
+
     def reset(self):
+        self.jobs.cancel()
         self.sme = None
         self.filename = None
         self.abund_pattern = "asplund2021"
         self.nlte_enabled = False
         self.fit_abundances = []
-        self.log_entries.clear()
-        self.cancel_solve()
-        self.cancel_mcmc()
-
-    def cancel_mcmc(self):
-        self.mcmc_runner = None
-        self.mcmc_task = None
-        self.mcmc_done = False
-        self.mcmc_error = None
         self.mcmc_results = None
-
-    def cancel_solve(self):
-        self.solve_cancelled = True
-        self.solver = None
-        self.solve_task = None
-        self.solve_progress = []
-        self.solve_done = False
-        self.solve_error = None
+        self.log_entries.clear()
 
 
 session = Session()
 
 
+def _require_idle():
+    """Reject changes while a computation runs, since the worker holds a snapshot."""
+    job = session.jobs.job
+    if job is not None and job.running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A {job.kind} computation is running. Cancel it before changing the "
+                "session, otherwise the change would be discarded when the result "
+                "arrives."
+            ),
+        )
+
+
 @router.post("/session/new")
 async def new_session():
     """Create a new empty SME_Structure."""
+    _require_idle()
     session.reset()
     session.sme = SME_Structure()
     session.filename = None
@@ -139,6 +145,7 @@ async def new_session():
 @router.post("/session/load")
 async def load_session(file: UploadFile = File(...)):
     """Load an SME file (.sme, .npy, .npz)."""
+    _require_idle()
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -171,6 +178,7 @@ async def load_session(file: UploadFile = File(...)):
 @router.post("/session/load-test")
 async def load_test_spectrum():
     """Load a test setup with solar-like parameters."""
+    _require_idle()
     from ...abund import Abund
 
     session.reset()
@@ -195,6 +203,7 @@ async def load_test_spectrum():
 @router.post("/session/load-solar")
 async def load_solar_spectrum():
     """Load the NSO solar atlas as observed spectrum."""
+    _require_idle()
     from ...nso import load_solar_spectrum as _load_solar
     from ...abund import Abund
     from ...iliffe_vector import Iliffe_vector
@@ -352,6 +361,7 @@ async def get_params():
 @router.put("/params")
 async def update_params(params: StellarParams):
     """Update stellar parameters."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -375,6 +385,7 @@ async def update_params(params: StellarParams):
 @router.put("/fit-settings")
 async def update_fit_settings(settings: FitSettings):
     """Update which parameters to fit."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -399,6 +410,7 @@ async def update_fit_settings(settings: FitSettings):
 @router.put("/instrument")
 async def update_instrument(settings: InstrumentSettings):
     """Update instrumental settings."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -421,6 +433,7 @@ async def update_instrument(settings: InstrumentSettings):
 @router.put("/continuum")
 async def update_continuum(settings: ContinuumSettings):
     """Update continuum settings."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -433,6 +446,7 @@ async def update_continuum(settings: ContinuumSettings):
 @router.put("/radial-velocity")
 async def update_radial_velocity(settings: RadialVelocitySettings):
     """Update radial velocity settings."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -444,6 +458,7 @@ async def update_radial_velocity(settings: RadialVelocitySettings):
 @router.put("/abund-pattern")
 async def update_abund_pattern(update: AbundPatternUpdate):
     """Update abundance pattern."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -463,6 +478,7 @@ async def update_abund_pattern(update: AbundPatternUpdate):
 @router.put("/wave-limits")
 async def update_wave_limits(update: WaveLimitsUpdate):
     """Update wavelength limits for synthesis (single segment)."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -477,6 +493,7 @@ async def update_wave_limits(update: WaveLimitsUpdate):
 @router.put("/wave-limits/multi")
 async def update_wave_limits_multi(update: MultiSegmentWaveLimits):
     """Update wavelength limits for multiple segments."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -500,6 +517,7 @@ NLTE_ELEMENTS = ["H", "Li", "C", "N", "O", "Na", "Mg", "Al", "Si", "K", "Ca", "T
 @router.put("/nlte")
 async def update_nlte(settings: NLTESettings):
     """Enable or disable NLTE for supported elements."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -520,6 +538,7 @@ async def update_nlte(settings: NLTESettings):
 @router.put("/fit-abundances")
 async def update_fit_abundances(settings: AbundanceFitSettings):
     """Update which element abundances to fit."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -570,6 +589,7 @@ async def get_spectrum_plot(segment: int = 0):
 @router.put("/spectrum/mask")
 async def update_mask(update: MaskUpdate):
     """Update spectrum mask in a wavelength range."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -590,6 +610,7 @@ async def update_mask(update: MaskUpdate):
 @router.post("/spectrum/load")
 async def load_spectrum(file: UploadFile = File(...)):
     """Load observed spectrum from FITS or CSV file."""
+    _require_idle()
     if session.sme is None:
         session.sme = SME_Structure()
 
@@ -685,6 +706,7 @@ async def list_linelists():
 @router.post("/linelist/load-builtin")
 async def load_builtin_linelist(request: BuiltinLinelistRequest):
     """Load a built-in linelist by name."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -719,6 +741,7 @@ async def load_builtin_linelist(request: BuiltinLinelistRequest):
 @router.post("/linelist/load")
 async def load_linelist(file: UploadFile = File(...)):
     """Load linelist from VALD file."""
+    _require_idle()
     if session.sme is None:
         raise HTTPException(status_code=400, detail="No session loaded")
 
@@ -773,27 +796,28 @@ async def synthesize(request: SynthesizeRequest = None):
     if session.sme.linelist is None or len(session.sme.linelist) == 0:
         raise HTTPException(status_code=400, detail="No linelist loaded")
 
-    try:
-        sme = session.sme
-        segments = request.segments if request and request.segments else "all"
-        session.sme = synthesize_spectrum(sme, segments=segments)
-        return {"status": "ok", "message": "Synthesis complete"}
-    except Exception as e:
-        logger.exception("Synthesis failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    _require_idle()
+
+    segments = request.segments if request and request.segments else None
+    job = _start_job("synthesize", {"segments": segments})
+
+    # Long call, but the computation is in the worker: the event loop stays free
+    # to serve progress, logs and the cancel request.
+    await job.wait()
+
+    if job.status == "cancelled":
+        return {"status": "cancelled", "message": "Synthesis cancelled"}
+    if job.status == "error":
+        raise HTTPException(status_code=500, detail=job.error)
+    return {"status": "ok", "message": "Synthesis complete"}
 
 
-def _run_solve(sme, fitparams):
-    """Run solver in background thread."""
+def _start_job(kind: str, payload: dict):
+    """Hand a computation to the worker process."""
     try:
-        solver = SME_Solver()
-        session.solver = solver
-        session.sme = solver.solve(sme, fitparams)
-        session.solve_done = True
-    except Exception as e:
-        logger.exception("Solve failed")
-        session.solve_error = str(e)
-        session.solve_done = True
+        return session.jobs.start(kind, session.sme, payload)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/solve")
@@ -811,20 +835,13 @@ async def solve(request: SolveRequest):
     if not request.parameters and not session.fit_abundances:
         raise HTTPException(status_code=400, detail="No parameters to fit")
 
+    _require_idle()
+
     fitparams = list(request.parameters)
     for elem in session.fit_abundances:
         fitparams.append(f"abund {elem}")
 
-    session.solve_cancelled = False
-    session.solve_done = False
-    session.solve_error = None
-    session.solve_progress = []
-
-    thread = threading.Thread(
-        target=_run_solve, args=(session.sme, fitparams)
-    )
-    session.solve_task = thread
-    thread.start()
+    _start_job("solve", {"parameters": fitparams})
 
     return {"status": "ok", "message": "Solve started"}
 
@@ -834,17 +851,22 @@ async def solve_stream():
     """Stream solve progress via Server-Sent Events."""
 
     async def event_generator():
+        job = session.jobs.job_of_kind("solve")
+        if job is None:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No fit is running'})}\n\n"
+            return
+
         while True:
-            if session.solve_cancelled:
+            if job.status == "cancelled":
                 yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
                 break
 
-            if session.solve_error:
-                yield f"data: {json.dumps({'type': 'error', 'message': session.solve_error})}\n\n"
+            if job.status == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': job.error})}\n\n"
                 break
 
-            if session.solve_done:
-                result = {}
+            if job.status == "done":
+                result = {"type": "done"}
                 if session.sme and session.sme.fitresults:
                     fr = session.sme.fitresults
                     result = {
@@ -855,24 +877,54 @@ async def solve_stream():
                         "chisq": float(fr.chisq) if fr.chisq is not None else None,
                         "iterations": int(fr.iterations) if fr.iterations is not None else 0,
                     }
-                else:
-                    result = {"type": "done"}
                 yield f"data: {json.dumps(result)}\n\n"
                 break
 
-            if session.solver:
-                yield f"data: {json.dumps({'type': 'progress', 'iteration': session.solver.iteration})}\n\n"
+            yield f"data: {json.dumps({'type': 'progress', 'iteration': job.iteration})}\n\n"
 
             await asyncio.sleep(0.5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+_JOB_LABELS = {"synthesize": "Synthesis", "solve": "Fit", "mcmc": "MCMC"}
+
+
+@router.post("/cancel")
+async def cancel_job():
+    """Kill whatever computation is running."""
+    # Killing joins the worker process: keep it off the event loop.
+    job = await asyncio.to_thread(session.jobs.cancel)
+    if job is None:
+        return {"status": "idle", "message": "Nothing is running"}
+    return {"status": "ok", "message": f"{_JOB_LABELS.get(job.kind, job.kind)} cancelled"}
+
+
 @router.post("/solve/cancel")
 async def cancel_solve():
-    """Cancel running solve."""
-    session.solve_cancelled = True
-    return {"status": "ok", "message": "Solve cancelled"}
+    """Kill a running fit."""
+    job = await asyncio.to_thread(session.jobs.cancel, "solve")
+    if job is None:
+        return {"status": "idle", "message": "No fit is running"}
+    return {"status": "ok", "message": "Fit cancelled"}
+
+
+@router.post("/mcmc/cancel")
+async def cancel_mcmc():
+    """Kill a running MCMC run."""
+    job = await asyncio.to_thread(session.jobs.cancel, "mcmc")
+    if job is None:
+        return {"status": "idle", "message": "No MCMC run is running"}
+    return {"status": "ok", "message": "MCMC cancelled"}
+
+
+@router.get("/job")
+async def get_job():
+    """State of the current (or most recent) computation."""
+    job = session.jobs.job
+    if job is None:
+        return {"running": False, "kind": None}
+    return {"running": job.running, **job.as_dict()}
 
 
 @router.get("/fit-results", response_model=Optional[FitResult])
@@ -891,23 +943,6 @@ async def get_fit_results():
         chisq=float(fr.chisq) if fr.chisq is not None else 0.0,
         iterations=int(fr.iterations) if fr.iterations is not None else 0,
     )
-
-
-def _run_mcmc(sme, params, nwalkers, nsteps, nburn):
-    """Run MCMC in background thread."""
-    from ...solve import SME_MCMC
-
-    try:
-        mcmc = SME_MCMC(sme, nwalkers=nwalkers, nsteps=nsteps, nburn=nburn)
-        session.mcmc_runner = mcmc
-        results = mcmc.run(params, progress=False)
-        session.sme = mcmc.sme
-        session.mcmc_results = results
-        session.mcmc_done = True
-    except Exception as e:
-        logger.exception("MCMC failed")
-        session.mcmc_error = str(e)
-        session.mcmc_done = True
 
 
 @router.post("/mcmc")
@@ -929,17 +964,18 @@ async def run_mcmc(request: MCMCRequest):
     if not params:
         raise HTTPException(status_code=400, detail="No parameters to sample")
 
-    session.mcmc_done = False
-    session.mcmc_error = None
-    session.mcmc_results = None
-    session.mcmc_runner = None
+    _require_idle()
 
-    thread = threading.Thread(
-        target=_run_mcmc,
-        args=(session.sme, params, request.nwalkers, request.nsteps, request.nburn),
+    session.mcmc_results = None
+    _start_job(
+        "mcmc",
+        {
+            "parameters": params,
+            "nwalkers": request.nwalkers,
+            "nsteps": request.nsteps,
+            "nburn": request.nburn,
+        },
     )
-    session.mcmc_task = thread
-    thread.start()
 
     return {"status": "ok", "message": "MCMC started"}
 
@@ -949,12 +985,21 @@ async def mcmc_stream():
     """Stream MCMC progress via Server-Sent Events."""
 
     async def event_generator():
+        job = session.jobs.job_of_kind("mcmc")
+        if job is None:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No MCMC run is running'})}\n\n"
+            return
+
         while True:
-            if session.mcmc_error:
-                yield f"data: {json.dumps({'type': 'error', 'message': session.mcmc_error})}\n\n"
+            if job.status == "cancelled":
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
                 break
 
-            if session.mcmc_done:
+            if job.status == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': job.error})}\n\n"
+                break
+
+            if job.status == "done":
                 result = {"type": "done"}
                 if session.mcmc_results:
                     result.update({
@@ -968,8 +1013,7 @@ async def mcmc_stream():
                 yield f"data: {json.dumps(result)}\n\n"
                 break
 
-            if session.mcmc_runner:
-                yield f"data: {json.dumps({'type': 'progress', 'iteration': session.mcmc_runner.iteration})}\n\n"
+            yield f"data: {json.dumps({'type': 'progress', 'iteration': job.iteration})}\n\n"
 
             await asyncio.sleep(0.5)
 
