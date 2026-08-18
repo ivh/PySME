@@ -24,7 +24,7 @@ class SavFile(AtmosphereGrid):
         # and was generated in a previous iteration of PySME
         try:
             self = cls.load(filename)
-            cls._cache = self
+            cls._cache[filename] = self
             return self
         except:
             pass
@@ -149,7 +149,7 @@ class SavFile(AtmosphereGrid):
         self["opflag"] = np.stack(atmo_grid["opflag"])
 
         # Store in cache
-        cls._cache = self
+        cls._cache[filename] = self
         # And also replace the IDL file with a numpy file in the cache
         # We have to use a try except block, as this will crash with
         # permissions denied on windows, when trying to copy an open file
