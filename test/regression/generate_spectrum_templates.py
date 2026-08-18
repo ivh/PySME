@@ -27,6 +27,22 @@ CA5002_LINELIST = REGRESSION_DATA / "ca5002_window.lin"
 DELTA_LAMBDA = 0.02
 
 
+# TiO makes up 86-96 % of these VALD extractions. At solar temperature it
+# contributes nothing at all: dropping it leaves the synthesised flux identical
+# to the last bit at 5771 K, in both the Halpha and the Ca 5002 window. It is
+# *not* negligible for the 4277 K Arcturus window, where dropping it shifts the
+# line core by 1.7e-3 and would eat most of MAX_ABS_LIMIT, so cool stars keep
+# the full list.
+TIO_MIN_TEFF = 5000.0
+
+
+def drop_negligible_tio(linelist, teff: float):
+    if teff < TIO_MIN_TEFF:
+        return linelist
+    species = np.array([str(s).split()[0] for s in linelist["species"]])
+    return linelist[species != "TiO"]
+
+
 def repo_relpath(path: Path) -> str:
     return str(path.resolve().relative_to(ROOT))
 
@@ -87,7 +103,8 @@ def load_linelist(cfg: dict):
     w0, w1 = cfg["wave_range"]
     ll = ValdFile(ROOT / cfg["linelist_path"])
     wl = np.asarray(ll["wlcent"], dtype=float)
-    return ll[(wl >= w0 - 3.0) & (wl <= w1 + 3.0)]
+    ll = ll[(wl >= w0 - 3.0) & (wl <= w1 + 3.0)]
+    return drop_negligible_tio(ll, cfg["teff"])
 
 
 def synthesize_window(cfg: dict) -> tuple[np.ndarray, np.ndarray]:
