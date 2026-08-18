@@ -27,7 +27,7 @@ import requests
 
 from pysme.large_file_storage import setup_atmo
 
-from test.conftest import skipif_smelib
+from test.conftest import datafiles_available, skipif_smelib
 
 pytestmark = [pytest.mark.slow, skipif_smelib]
 
@@ -45,31 +45,8 @@ def gui_available():
 
 
 def data_available(*keys):
-    """Each datafile must be cached already or still be downloadable.
-
-    The file server has no directory index, so a HEAD on its root is useless;
-    ask the LargeFileStorage for the actual candidate URLs of the files a
-    synthesis needs.
-    """
-    lfs = setup_atmo()
-    for key in keys:
-        try:
-            urls = lfs.get_urls(key)
-        except Exception:
-            return False
-        for url in urls:
-            if url.startswith("file://"):
-                if os.path.exists(url[7:]):
-                    break
-            else:
-                try:
-                    if requests.head(url, timeout=15, allow_redirects=True).ok:
-                        break
-                except requests.RequestException:
-                    continue
-        else:
-            return False
-    return True
+    """The atmosphere grid and solar atlas a synthesis needs must be usable."""
+    return datafiles_available(setup_atmo(), *keys)
 
 
 def free_port():
