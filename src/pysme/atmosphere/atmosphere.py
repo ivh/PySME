@@ -300,7 +300,11 @@ class AtmosphereGrid(np.recarray):
     def load(cls, filename):
         """Load the atmosphere grid data from disk"""
         data = np.load(filename)
-        self = data["data"].view(cls)
+        # The recarray view is what sets dtype.type to np.record. Without it a
+        # single row comes back as a bare np.void, and __getitem__ below only
+        # turns np.record into an Atmosphere, so rows loaded from disk would
+        # behave differently from ones parsed out of an IDL save file.
+        self = data["data"].view(np.recarray).view(cls)
         header = data["header"]
         for k in header.dtype.names:
             v = header[k][()]
