@@ -275,7 +275,7 @@ class LargeFileStorage:
                         unit="B",
                         unit_scale=True,
                         unit_divisor=1024,
-                        disable=~show_progress_bars,
+                        disable=not show_progress_bars,
                     ) as t:
                         fobj = CallbackIOWrapper(t.update, f_in, "read")
                         while True:
