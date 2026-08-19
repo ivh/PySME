@@ -604,8 +604,7 @@ class Grid:
         mask = np.zeros(self._depth.shape[:-1], bool)
         for i, j, k in itertools.product(f, g, t):
             mask[i, j, k] = True
-        self.depth = self._depth[mask, :]
-        self.depth.shape = nfeh, ngrav, nteff, -1
+        self.depth = self._depth[mask, :].reshape(nfeh, ngrav, nteff, -1)
 
         # Reduce the stored data to only relevant energy levels
         # Remap the previous indices into a collapsed sequence
