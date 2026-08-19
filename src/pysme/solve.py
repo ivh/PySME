@@ -276,7 +276,9 @@ class SME_Solver:
             for name in self.derived_param.keys():
                 if _is_abund_parameter(name):
                     abund_name = _get_abund_element(name)
-                    sme.abund[abund_name] = self.derived_param[name](sme) - sme.monh
+                    sme.abund.update_pattern(
+                        {abund_name: self.derived_param[name](sme) - sme.monh}
+                    )
                 else:
                     sme[name] = self.derived_param[name](sme)
 
