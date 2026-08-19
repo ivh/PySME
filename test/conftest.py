@@ -102,3 +102,31 @@ def sme_2segments(require_smelib):
     sme.vrad_flag = "none"
     sme.cscale_flag = "none"
     return sme
+
+
+def datafiles_available(lfs, *keys):
+    """Whether large datafiles are usable: cached locally or still downloadable.
+
+    The file server has no directory index, so a HEAD on its root always 404s;
+    ask the LargeFileStorage for the real candidate URLs of the files instead.
+    """
+    import requests
+
+    for key in keys:
+        try:
+            urls = lfs.get_urls(key)
+        except Exception:
+            return False
+        for url in urls:
+            if url.startswith("file://"):
+                if Path(url[7:]).exists():
+                    break
+            else:
+                try:
+                    if requests.head(url, timeout=15, allow_redirects=True).ok:
+                        break
+                except requests.RequestException:
+                    continue
+        else:
+            return False
+    return True

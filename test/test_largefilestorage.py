@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
 import pytest
-import requests
 
-from pysme.config import Config
 from pysme.large_file_storage import setup_atmo, setup_nlte
+
+from .conftest import datafiles_available
 
 
 def lfs_available():
-    config = Config()
-    try:
-        r = requests.head(config["data.file_server"])
-    except requests.RequestException:
-        return False
-    return r.status_code == 200
+    return datafiles_available(setup_atmo(), "marcs2012.sav") and datafiles_available(
+        setup_nlte(), "nlte_Ca_pysme.grd"
+    )
 
 
 skipif_lfs = pytest.mark.skipif(not lfs_available(), reason="LFS not available")

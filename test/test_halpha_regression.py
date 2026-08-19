@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
 import hashlib
-import json
 from urllib.error import URLError
 
 import numpy as np
@@ -9,7 +8,7 @@ import pytest
 
 from pysme.abund import Abund
 from pysme.config import Config
-from pysme.large_file_storage import LargeFileStorage, _get_file_servers
+from pysme.large_file_storage import setup_nlte
 from pysme.linelist.vald import ValdFile
 from pysme.sme import SME_Structure
 from pysme.synthesize import synthesize_spectrum
@@ -67,24 +66,19 @@ CORE_DEPTH_LIMIT = 1e-3
 
 
 def _has_local_h_nlte_grid():
+    """Whether the H grid is already downloaded. These tests never fetch it.
+
+    The URLs have to come from the same LargeFileStorage that does the
+    downloading: building one by hand from data.file_server alone yields
+    mirror URLs that were never used, so the cache lookup always missed.
+    """
     config = Config()
     nlte_root = Path(config["data.nlte_grids"]).expanduser()
-    pointers = Path(config["data.pointers.nlte_grids"]).expanduser()
-    if not pointers.is_absolute():
-        pointers = Path(config.filename).resolve().parent / pointers
-
-    if not pointers.exists():
+    try:
+        lfs = setup_nlte(config)
+    except Exception:
         return False
 
-    mapping = json.loads(pointers.read_text())
-    if "nlte_H_pysme.grd" not in mapping:
-        return False
-
-    lfs = LargeFileStorage(
-        server=_get_file_servers(config),
-        pointers=mapping,
-        storage=str(nlte_root),
-    )
     for url in lfs.get_urls("nlte_H_pysme.grd"):
         cache_dir = nlte_root / "download" / "url" / hashlib.md5(url.encode()).hexdigest()
         if (cache_dir / "contents").exists():
